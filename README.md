@@ -15,8 +15,8 @@ Implemented:
 - Knowledge vault directory layout for layered recruitment intelligence
 - Embedded Joblens integration copy: `integrations/joblens`
 - MCP resource for reading the current persona
-- MCP resource for reading L5 job detail Markdown files by job id
-- MCP tool stub for triggering a clipper collection task
+- MCP resource for reading job detail Markdown files by nested path
+- MCP tool for searching job detail files
 - MCP tool for launching Zhilian collection through the embedded Joblens Chrome extension
 - MCP tool for archiving Joblens outputs from `D:\Downloads` into the knowledge vault
 - MCP tool for updating persona skill confidence scores
@@ -25,8 +25,8 @@ Not implemented yet:
 
 - Real collection scripts under `collection_layer`
 - Session orchestration under `session_layer`
-- L1-L5 knowledge material population
 - Full recommendation or consulting workflow
+- Stable protocol-level stdio MCP smoke test; the default smoke test currently covers function-level behavior
 
 ## Directory Layout
 
@@ -52,7 +52,7 @@ JobSniper/
 
 Reserved for collection commands and adapters.
 
-The current `trigger_clipper` MCP tool is still a stub for single-page collection. Zhilian list/detail harvesting is handled by `launch_zhilian_collection` and `archive_joblens_outputs`.
+Zhilian collection is split into job menu, job list, and job detail tools; archive handling is done by `archive_joblens_outputs`.
 
 ### `integrations/joblens`
 
@@ -111,50 +111,115 @@ If `current_user.json` does not exist, the server returns a default empty person
 
 Returns a job detail Markdown file from the nested storage layer.
 
+Example:
+
+```text
+jobsniper://vault/positions/zhilian/产品/互联网产品经理/AI产品经理/上海倍通医药科技咨询有限公司_AI产品经理.md
+```
+
 ## MCP Tools
 
-### `trigger_clipper(url: str, job_title: str)`
+### `find_job_detail(platform: str, keyword: str, company: str | None = null, limit: int = 5)`
 
-Current behavior:
+Searches job detail Markdown files by filename.
 
-- returns a simulated collection-start message
+Parameters:
 
-Intended behavior:
+- `platform`: `zhilian` or `boss`
+- `keyword`: job title or filename keyword
+- `company`: optional company-name keyword
+- `limit`: maximum number of matches to return
 
-- trigger Joblens or a platform-specific collector
-- collect a job detail page
-- save the result into the storage layer
+The response includes each matching file's absolute path, relative path, and readable resource URI.
 
-### `launch_zhilian_collection(keyword: str, city_id: str = "538", pages: str = "auto", test: bool = false, detail_test: bool = false, detail_limit: int = 5, debug: bool = true)`
+### Collection Interface Types
 
-Launches Windows Chrome with the embedded Joblens extension and opens a Zhilian collection URL.
+JobSniper collection is split by data layer:
+
+- **job menu**: platform job menu, usually an industry-function-occupation tree.
+- **job list**: jobs under one occupation keyword.
+- **job detail**: one concrete job posting detail page.
+
+### `launch_zhilian_job_menu_collection(city_id: str = "538", debug: bool = true)`
+
+Collects the Zhilian platform job menu and extracts the industry-function-occupation tree and keyword pool.
+
+The tool opens:
+
+```text
+https://www.zhaopin.com/?jl={city_id}&clipper_keyword_discovery=1&clipper_debug=1
+```
+
+Output:
+
+```text
+zhilian_keyword_discovery_{timestamp}.md
+```
+
+### `launch_zhilian_job_list_collection(keyword: str, city_id: str = "538", pages: str = "auto", test: bool = false, debug: bool = true)`
+
+Collects the Zhilian job list under one occupation keyword. It launches Windows Chrome with the embedded Joblens extension and opens a Zhilian search URL.
 
 The generated URL includes:
 - `clipper_auto=1`
 - `jl={city_id}`
 - `clipper_pages={pages}`
 - `clipper_keyword_b64u={base64url(keyword)}`
-- optional `clipper_test=1`, `clipper_detail_test=1`, and `clipper_debug=1`
+- optional `clipper_test=1` and `clipper_debug=1`
 
 The tool returns the collection URL, Chrome command, expected download directory, and suggested archive call.
 
+### `launch_zhilian_job_detail_collection(job_url: str, keyword: str = "", debug: bool = true)`
+
+Collects one Zhilian job detail page. The tool opens the given job URL and appends:
+
+- `clipper_job_detail=1`
+- optional `clipper_keyword={keyword}`
+- optional `clipper_debug=1`
+
+Outputs include one job detail Markdown file, raw detail HTML, and a detail manifest. After archive, the Markdown becomes the final job-detail leaf:
+
+```text
+{Company Name}_{Job Title}.md
+```
+
+### Concept split
+
+These two artifacts are intentionally different:
+
+- **Keyword discovery artifact**: `zhilian_keyword_discovery_{timestamp}.md`
+  - Produced from the Zhilian keyword discovery page.
+  - Captures platform-level categories, keyword groups, and discovery time.
+  - Stored at the root of `storage_layer/positions/`.
+- **Platform index table**: `_行业索引表_智联招聘.md`
+  - Stored inside `storage_layer/positions/zhilian_intelligence_vault/`.
+  - Serves as the internal navigation table that connects industry, function, occupation, and job detail files.
+  - It is not the direct output of the keyword discovery tool.
+
+In short:
+
+- The discovery artifact answers "what keywords and groups exist on Zhilian".
+- The platform index table answers "how those groups are organized inside the vault".
+
 ### `archive_joblens_outputs(keyword: str, since_minutes: int = 60, dry_run: bool = false, include_test: bool = false)`
 
-Scans `D:\Downloads` through `/mnt/d/Downloads` for recent `ZHILIAN_*` files and moves matching outputs into the JobSniper storage layer (`storage_layer/positions/zhilian_intelligence_vault/`).
+Scans `D:\Downloads` through `/mnt/d/Downloads` for recent `ZHILIAN_*` files and moves matching outputs into the JobSniper storage layer.
 
 The tool resolves the nested path using industry and function mappings from the master task list.
 
 Routing convention (Internal):
-- `ZHILIAN_KEYWORDS_*.md` -> Root of platform vault as Platform Index (`_Platform Index_[Platform Name].md`).
+- `zhilian_keyword_discovery_*.md` -> `storage_layer/positions/` root as platform-level discovery artifact.
+- `_行业索引表_智联招聘.md` -> `storage_layer/positions/zhilian_intelligence_vault/` root as the platform index table.
 - `ZHILIAN_<keyword>_*.md` -> Occupation folder as Job Index (`_Job Index_[Occupation Name].md`).
 - `ZHILIAN_RAW_<keyword>_*.json/html` -> `raw/` subdirectory within the Occupation folder.
-- `ZHILIAN_DETAIL_*_<keyword>_*.md` -> Final leaf in the tree structure (`{Company Name}_{Job Title}.md`).
+- `ZHILIAN_DETAIL_{Company Name}_{Job Title}_{timestamp}.md` -> Final leaf in the tree structure (`{Company Name}_{Job Title}.md`).
+- `ZHILIAN_DETAIL_RAW_*` and `ZHILIAN_DETAIL_MANIFEST_*` -> `raw/` subdirectory within the Occupation folder.
 
 Recommended operating flow:
 
 1. Launch collection:
 ```text
-launch_zhilian_collection(keyword="AI产品经理", test=true, debug=true)
+launch_zhilian_job_list_collection(keyword="AI产品经理", test=true, debug=true)
 ```
 
 2. Wait until Joblens finishes writing downloads.
@@ -188,6 +253,13 @@ Example fields written to `current_user.json`:
 
 ## Run
 
+Install dependencies:
+
+```bash
+cd /home/xstars/programs/JobSniper
+python -m pip install -r requirements.txt
+```
+
 From the project directory:
 
 ```bash
@@ -195,3 +267,26 @@ cd /home/xstars/programs/JobSniper
 source venv/bin/activate
 python mcp_server.py
 ```
+
+The MCP server name is:
+
+```text
+FastMCP("JobSniper")
+```
+
+## Verification
+
+The default smoke test covers Python import, persona reads, nested job-detail reads, job search, and archive dry-run behavior:
+
+```bash
+cd /home/xstars/programs/JobSniper
+venv/bin/python scripts/smoke_mcp_server.py
+```
+
+Protocol-level stdio smoke test entrypoint:
+
+```bash
+venv/bin/python scripts/smoke_mcp_server.py --stdio --timeout 8
+```
+
+In the current environment, the protocol-level test passes and verifies `initialize`, `list_tools`, and `list_resources`.
