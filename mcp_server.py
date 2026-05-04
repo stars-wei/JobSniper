@@ -369,7 +369,7 @@ def launch_zhilian_job_detail_collection(
     debug: bool = True,
 ) -> str:
     """
-    采集智联单个岗位详情页。
+    采集智联单个岗位详情页。通过写入任务文件，由 Chrome 扩展后台静默采集。
     """
     if not job_url.strip():
         return _json_response({"ok": False, "error": "job_url must not be empty"})
@@ -388,7 +388,21 @@ def launch_zhilian_job_detail_collection(
     if debug:
         params["clipper_debug"] = "1"
     detail_url = urlunparse(parsed._replace(query=urlencode(params)))
-    return _launch_zhilian_with_url(detail_url, keyword.strip() or "job_detail", "zhilian_job_detail")
+
+    # Write to detail task queue file for the Chrome extension to pick up
+    task_file = Path(DOWNLOADS_PATH) / "zhilian_detail_tasks.jsonl"
+    task_line = json.dumps({"url": detail_url, "keyword": keyword.strip() or "job_detail"}) + "\n"
+    try:
+        with open(task_file, "a", encoding="utf-8") as f:
+            f.write(task_line)
+        return _json_response({
+            "ok": True,
+            "url": detail_url,
+            "task_file": str(task_file),
+            "message": "Task enqueued. Chrome extension will process it in background.",
+        })
+    except Exception as exc:
+        return _json_response({"ok": False, "error": f"Failed to write task file: {exc}"})
 
 @mcp.tool()
 def archive_joblens_outputs(
@@ -399,7 +413,9 @@ def archive_joblens_outputs(
     include_test: bool = False,
 ) -> str:
     """
-    将 D:\\Downloads 中的 Joblens 输出归档到对应平台的 knowledge_vault。
+    将 D:\\Downloads 中的 Joblens 输出归档到 storage_layer/positions/{platform}_intelligence_vault。
+    - platform=zhilian → storage_layer/positions/zhilian_intelligence_vault
+    - platform=boss    → storage_layer/positions/boss_intelligence_vault
     参数:
     - platform: zhilian 或 boss
     """

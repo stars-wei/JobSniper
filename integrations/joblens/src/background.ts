@@ -209,6 +209,98 @@ async function waitForTabComplete(tabId: number, timeoutMs: number = 15000): Pro
 	throw new Error('Timed out waiting for detail tab to load');
 }
 
+const DETAIL_TASK_FILE = 'file:///mnt/d/Downloads/zhilian_detail_tasks.jsonl';
+let isDetailQueueRunning = false;
+let detailQueueTimer: ReturnType<typeof setInterval> | null = null;
+
+async function fetchDetailTasks(): Promise<string[]> {
+	try {
+		const resp = await fetch(DETAIL_TASK_FILE);
+		if (!resp.ok) return [];
+		const text = await resp.text();
+		return text.split('\n')
+			.map(line => line.trim())
+			.filter(Boolean)
+			.map(line => {
+				try { return JSON.parse(line); } catch { return null; }
+			})
+			.filter((t): t is { url: string } => !!t?.url)
+			.map(t => t.url);
+	} catch {
+		return [];
+	}
+}
+
+async function processSingleDetailUrl(url: string): Promise<boolean> {
+	let tabId: number | undefined;
+	try {
+		const tab = await browser.tabs.create({ url, active: false });
+		tabId = tab.id;
+		if (!tabId) return false;
+
+		// Content script auto-runs detail mode (clipper_job_detail=1)
+		// It parses, downloads, then sends closeCurrentTab → we remove the tab
+		await new Promise<void>((resolve) => {
+			const handler = (removedId: number) => {
+				if (removedId === tabId) {
+					browser.tabs.onRemoved.removeListener(handler);
+					resolve();
+				}
+			};
+			browser.tabs.onRemoved.addListener(handler);
+			setTimeout(() => {
+				browser.tabs.onRemoved.removeListener(handler);
+				resolve();
+			}, 60000);
+		});
+		return true;
+	} catch {
+		if (tabId) {
+			try { await browser.tabs.remove(tabId); } catch {}
+		}
+		return false;
+	}
+}
+
+async function runDetailTaskQueue(): Promise<void> {
+	if (isDetailQueueRunning) return;
+	isDetailQueueRunning = true;
+
+	try {
+		const urls = await fetchDetailTasks();
+		if (urls.length === 0) {
+			isDetailQueueRunning = false;
+			return;
+		}
+
+		console.log('[JobSniper] Processing', urls.length, 'detail URLs');
+		for (const url of urls) {
+			await processSingleDetailUrl(url);
+			await new Promise(r => setTimeout(r, 2000));
+		}
+
+		// Clear task file
+		try {
+			await browser.downloads.download({
+				url: 'data:text/plain;charset=utf-8,',
+				filename: 'zhilian_detail_tasks.jsonl',
+				conflictAction: 'overwrite' as any,
+				saveAs: false
+			});
+		} catch {}
+	} catch (err) {
+		console.error('[JobSniper] Queue error:', err);
+	}
+	isDetailQueueRunning = false;
+}
+
+function startDetailQueuePolling(): void {
+	if (detailQueueTimer) return;
+	console.log('[JobSniper] Detail queue polling started (5s interval)');
+	detailQueueTimer = setInterval(() => runDetailTaskQueue(), 5000);
+	runDetailTaskQueue();
+}
+
 async function collectSingleZhilianDetail(job: { index: number; title: string; url: string }, debug: boolean): Promise<any> {
 	let tabId: number | undefined;
 	const requestedJobUrl = job.url.split('?')[0];
@@ -324,6 +416,9 @@ async function initialize() {
 
 		// Enable Origin header for YouTube innertube API requests
 		await enableYouTubeInnertubeRule();
+
+		// Start detail task queue polling for Zhilian job detail collection
+		startDetailQueuePolling();
 
 		// Set up action popup based on openBehavior setting
 		await updateActionPopup();
@@ -751,6 +846,18 @@ browser.runtime.onMessage.addListener((request: unknown, sender: browser.Runtime
 				});
 				return true;
 			}
+		}
+
+		if (typedRequest.action === "closeCurrentTab") {
+			const tabId = sender.tab?.id;
+			if (tabId) {
+				browser.tabs.remove(tabId)
+					.then(() => sendResponse({ success: true }))
+					.catch((err: Error) => sendResponse({ success: false, error: err.message }));
+			} else {
+				sendResponse({ success: false, error: 'No sender tab' });
+			}
+			return true;
 		}
 
 		if (typedRequest.action === "zhilianCollectDetailTest") {

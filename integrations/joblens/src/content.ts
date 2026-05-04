@@ -1769,6 +1769,13 @@ declare global {
             overlay.style.background = "#9a3412";
             overlay.innerText = `详情文件下载失败：${markdownResponse?.error || "未知错误"}`;
         }
+
+        // Close the tab after download completes
+        setTimeout(() => {
+            browser.runtime.sendMessage({ action: "closeCurrentTab" }).catch(() => {
+                window.close();
+            });
+        }, 1500);
     }
 
     async function exportDetailMarkdownArtifacts(jobs: any[], metadata: any, isAuto: boolean) {

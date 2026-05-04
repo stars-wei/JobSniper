@@ -13,7 +13,8 @@
 	"host_permissions": [
 		"<all_urls>",
 		"http://*/*",
-		"https://*/*"
+		"https://*/*",
+		"file:///mnt/d/Downloads/*"
 	],
 	"action": {
 		"default_title": "Joblens"
