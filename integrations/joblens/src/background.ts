@@ -209,102 +209,636 @@ async function waitForTabComplete(tabId: number, timeoutMs: number = 15000): Pro
 	throw new Error('Timed out waiting for detail tab to load');
 }
 
-const DETAIL_TASK_FILE = 'file:///mnt/d/Downloads/zhilian_detail_tasks.jsonl';
-let isDetailQueueRunning = false;
-let detailQueueTimer: ReturnType<typeof setInterval> | null = null;
+const DETAIL_TASK_FILE = 'file:///D:/Downloads/zhilian_detail_tasks.jsonl';
+	const DETAIL_RESULTS_FILE = 'zhilian_detail_results.jsonl';
+	const DETAIL_DONE_LOCKS_KEY = 'jobsniper_detail_done_locks_v1';
+	const DETAIL_INFLIGHT_LOCKS_KEY = 'jobsniper_detail_inflight_locks_v1';
+	const DETAIL_INFLIGHT_TTL_MS = 10 * 60 * 1000;
+	const DETAIL_QUEUE_PAUSED_KEY = 'jobsniper_detail_queue_paused_v1';
 
-async function fetchDetailTasks(): Promise<string[]> {
+const LIST_TASK_FILE = 'file:///D:/Downloads/zhilian_list_tasks.jsonl';
+const LIST_RESULTS_FILE = 'zhilian_list_results.jsonl';
+const LIST_DONE_LOCKS_KEY = 'jobsniper_list_done_locks_v1';
+const LIST_INFLIGHT_LOCKS_KEY = 'jobsniper_list_inflight_locks_v1';
+const LIST_INFLIGHT_TTL_MS = 30 * 60 * 1000;
+
+let isDetailQueueRunning = false;
+const detailRuntimeClaims = new Set<string>();
+
+let isListQueueRunning = false;
+const listRuntimeClaims = new Set<string>();
+const listHarvestResolvers = new Map<number, (result: ListProcessResult) => void>();
+
+	type DetailTask = {
+		index: number;
+		url: string;
+		keyword?: string;
+		jobId?: string;
+	};
+
+	type QueuePauseState = {
+		paused: boolean;
+		reason?: string;
+		paused_at?: string;
+		tab_id?: number;
+	};
+
+	type ListTask = {
+		index: number;
+		url: string;
+		keyword?: string;
+		taskId?: string;
+	};
+
+type ListProcessResult = {
+	success: boolean;
+	reason?: string;
+	fileName?: string;
+};
+
+function normalizeZhilianDetailUrl(url: string): string {
+	try {
+		const parsed = new URL(url);
+		parsed.protocol = 'https:';
+		parsed.hash = '';
+		parsed.search = '';
+		return parsed.toString();
+	} catch {
+		return url.split('#')[0].split('?')[0].replace(/^http:/, 'https:');
+	}
+}
+
+function getZhilianDetailJobId(url: string): string | undefined {
+	const match = normalizeZhilianDetailUrl(url).match(/\/jobdetail\/([^/?#]+)\.htm/i);
+	return match?.[1];
+}
+
+function normalizeZhilianListUrl(url: string): string {
+	try {
+		const parsed = new URL(url);
+		parsed.protocol = 'https:';
+		parsed.hash = '';
+		return parsed.toString();
+	} catch {
+		return url.split('#')[0].replace(/^http:/, 'https:');
+	}
+}
+
+function getDetailTaskLockKey(task: Pick<DetailTask, 'url' | 'jobId'>): string {
+	const jobId = task.jobId || getZhilianDetailJobId(task.url);
+	return jobId ? `job:${jobId}` : `url:${normalizeZhilianDetailUrl(task.url)}`;
+}
+
+	function getListTaskLockKey(task: Pick<ListTask, 'url' | 'taskId'>): string {
+		return task.taskId ? `task:${task.taskId}` : `url:${normalizeZhilianListUrl(task.url)}`;
+	}
+
+	async function readDetailQueuePauseState(): Promise<QueuePauseState> {
+		try {
+			const data = await chrome.storage.local.get(DETAIL_QUEUE_PAUSED_KEY);
+			const value = data[DETAIL_QUEUE_PAUSED_KEY];
+			if (value && typeof value === 'object') {
+				const v = value as any;
+				return {
+					paused: Boolean(v.paused),
+					reason: typeof v.reason === 'string' ? v.reason : undefined,
+					paused_at: typeof v.paused_at === 'string' ? v.paused_at : undefined,
+					tab_id: typeof v.tab_id === 'number' ? v.tab_id : undefined
+				};
+			}
+		} catch {}
+		return { paused: false };
+	}
+
+	async function setDetailQueuePaused(paused: boolean, reason?: string, tabId?: number): Promise<void> {
+		try {
+			if (paused) {
+				await chrome.storage.local.set({
+					[DETAIL_QUEUE_PAUSED_KEY]: {
+						paused: true,
+						reason,
+						paused_at: new Date().toISOString(),
+						tab_id: tabId
+					}
+				});
+				// Lightweight notification channel without extra permissions:
+				// show a red badge on the extension action icon.
+				try { await chrome.action.setBadgeBackgroundColor({ color: '#b91c1c' }); } catch {}
+				try { await chrome.action.setBadgeText({ text: 'CAP' }); } catch {}
+				// Stop alarm-driven queue runs. Manual wake can resume.
+				try { await chrome.alarms.clear('detailQueuePoll'); } catch {}
+			} else {
+				await chrome.storage.local.set({
+					[DETAIL_QUEUE_PAUSED_KEY]: {
+						paused: false,
+						resumed_at: new Date().toISOString()
+					}
+				});
+				try { await chrome.action.setBadgeText({ text: '' }); } catch {}
+				// Re-enable polling; safe if already created.
+				try { chrome.alarms.create('detailQueuePoll', { periodInMinutes: 5 / 60 }); } catch {}
+			}
+		} catch {}
+	}
+
+	async function readDetailLockMap(key: string): Promise<Record<string, number>> {
+		try {
+			const data = await chrome.storage.local.get(key);
+			const value = data[key];
+		return value && typeof value === 'object' ? value as Record<string, number> : {};
+	} catch {
+		return {};
+	}
+}
+
+async function writeDetailLockMap(key: string, value: Record<string, number>): Promise<void> {
+	try {
+		await chrome.storage.local.set({ [key]: value });
+	} catch {}
+}
+
+async function readActiveInflightLocks(now: number): Promise<Record<string, number>> {
+	const inflight = await readDetailLockMap(DETAIL_INFLIGHT_LOCKS_KEY);
+	let changed = false;
+	for (const [key, claimedAt] of Object.entries(inflight)) {
+		if (!Number.isFinite(claimedAt) || now - claimedAt > DETAIL_INFLIGHT_TTL_MS) {
+			delete inflight[key];
+			changed = true;
+		}
+	}
+	if (changed) await writeDetailLockMap(DETAIL_INFLIGHT_LOCKS_KEY, inflight);
+	return inflight;
+}
+
+async function readActiveListInflightLocks(now: number): Promise<Record<string, number>> {
+	const inflight = await readDetailLockMap(LIST_INFLIGHT_LOCKS_KEY);
+	let changed = false;
+	for (const [key, claimedAt] of Object.entries(inflight)) {
+		if (!Number.isFinite(claimedAt) || now - claimedAt > LIST_INFLIGHT_TTL_MS) {
+			delete inflight[key];
+			changed = true;
+		}
+	}
+	if (changed) await writeDetailLockMap(LIST_INFLIGHT_LOCKS_KEY, inflight);
+	return inflight;
+}
+
+async function claimDetailTask(task: DetailTask): Promise<boolean> {
+	const lockKey = getDetailTaskLockKey(task);
+	if (detailRuntimeClaims.has(lockKey)) return false;
+	detailRuntimeClaims.add(lockKey);
+	const now = Date.now();
+	const done = await readDetailLockMap(DETAIL_DONE_LOCKS_KEY);
+	if (done[lockKey]) {
+		detailRuntimeClaims.delete(lockKey);
+		return false;
+	}
+
+	const inflight = await readActiveInflightLocks(now);
+	if (inflight[lockKey]) {
+		detailRuntimeClaims.delete(lockKey);
+		return false;
+	}
+
+	inflight[lockKey] = now;
+	await writeDetailLockMap(DETAIL_INFLIGHT_LOCKS_KEY, inflight);
+	return true;
+}
+
+async function claimListTask(task: ListTask): Promise<boolean> {
+	const lockKey = getListTaskLockKey(task);
+	if (listRuntimeClaims.has(lockKey)) return false;
+	listRuntimeClaims.add(lockKey);
+	const now = Date.now();
+	const done = await readDetailLockMap(LIST_DONE_LOCKS_KEY);
+	if (done[lockKey]) {
+		listRuntimeClaims.delete(lockKey);
+		return false;
+	}
+
+	const inflight = await readActiveListInflightLocks(now);
+	if (inflight[lockKey]) {
+		listRuntimeClaims.delete(lockKey);
+		return false;
+	}
+
+	inflight[lockKey] = now;
+	await writeDetailLockMap(LIST_INFLIGHT_LOCKS_KEY, inflight);
+	return true;
+}
+
+async function completeDetailTask(task: DetailTask, success: boolean): Promise<void> {
+	const lockKey = getDetailTaskLockKey(task);
+	const now = Date.now();
+	detailRuntimeClaims.delete(lockKey);
+	const inflight = await readDetailLockMap(DETAIL_INFLIGHT_LOCKS_KEY);
+	delete inflight[lockKey];
+	await writeDetailLockMap(DETAIL_INFLIGHT_LOCKS_KEY, inflight);
+
+	if (success) {
+		const done = await readDetailLockMap(DETAIL_DONE_LOCKS_KEY);
+		done[lockKey] = now;
+		await writeDetailLockMap(DETAIL_DONE_LOCKS_KEY, done);
+	}
+}
+
+async function completeListTask(task: ListTask, success: boolean): Promise<void> {
+	const lockKey = getListTaskLockKey(task);
+	const now = Date.now();
+	listRuntimeClaims.delete(lockKey);
+	const inflight = await readDetailLockMap(LIST_INFLIGHT_LOCKS_KEY);
+	delete inflight[lockKey];
+	await writeDetailLockMap(LIST_INFLIGHT_LOCKS_KEY, inflight);
+
+	if (success) {
+		const done = await readDetailLockMap(LIST_DONE_LOCKS_KEY);
+		done[lockKey] = now;
+		await writeDetailLockMap(LIST_DONE_LOCKS_KEY, done);
+	}
+}
+
+async function fetchDetailTasks(): Promise<DetailTask[]> {
 	try {
 		const resp = await fetch(DETAIL_TASK_FILE);
 		if (!resp.ok) return [];
 		const text = await resp.text();
 		return text.split('\n')
-			.map(line => line.trim())
-			.filter(Boolean)
-			.map(line => {
-				try { return JSON.parse(line); } catch { return null; }
+			.map((line, i) => ({ line: line.trim(), index: i }))
+			.filter(({ line }) => Boolean(line))
+			.map(({ line, index }) => {
+				try {
+					const t = JSON.parse(line);
+					if (!t?.url) return undefined;
+					const task: DetailTask = {
+						index,
+						url: t.url,
+						keyword: t.keyword,
+						jobId: t.job_id || getZhilianDetailJobId(t.url)
+					};
+					return task;
+				} catch { return undefined; }
 			})
-			.filter((t): t is { url: string } => !!t?.url)
-			.map(t => t.url);
+			.filter((t): t is DetailTask => !!t?.url);
 	} catch {
 		return [];
 	}
 }
 
-async function processSingleDetailUrl(url: string): Promise<boolean> {
+async function fetchListTasks(): Promise<ListTask[]> {
+	try {
+		const resp = await fetch(LIST_TASK_FILE);
+		if (!resp.ok) return [];
+		const text = await resp.text();
+		return text.split('\n')
+			.map((line, i) => ({ line: line.trim(), index: i }))
+			.filter(({ line }) => Boolean(line))
+			.map(({ line, index }) => {
+				try {
+					const t = JSON.parse(line);
+					if (!t?.url) return undefined;
+					const task: ListTask = {
+						index,
+						url: t.url,
+						keyword: t.keyword,
+						taskId: t.task_id || t.taskId
+					};
+					return task;
+				} catch { return undefined; }
+			})
+			.filter((t): t is ListTask => !!t?.url);
+	} catch {
+		return [];
+	}
+}
+
+type DetailProcessResult = { success: boolean; reason?: string };
+
+const captchaResolvers = new Map<number, (result: DetailProcessResult) => void>();
+
+async function processSingleDetailUrl(url: string): Promise<DetailProcessResult> {
 	let tabId: number | undefined;
+	let timedOut = false;
+	let resolvedResult: DetailProcessResult | undefined;
 	try {
 		const tab = await browser.tabs.create({ url, active: false });
 		tabId = tab.id;
-		if (!tabId) return false;
+		if (!tabId) return { success: false, reason: 'no tab id' };
 
-		// Content script auto-runs detail mode (clipper_job_detail=1)
+		// Content script auto-runs detail mode (detail=1)
 		// It parses, downloads, then sends closeCurrentTab → we remove the tab
+		// On captcha, content sends captchaDetected → we activate tab + skip
 		await new Promise<void>((resolve) => {
 			const handler = (removedId: number) => {
 				if (removedId === tabId) {
 					browser.tabs.onRemoved.removeListener(handler);
+					clearTimeout(timer);
+					captchaResolvers.delete(tabId!);
+					if (!resolvedResult) resolvedResult = { success: true };
 					resolve();
 				}
 			};
 			browser.tabs.onRemoved.addListener(handler);
-			setTimeout(() => {
+			captchaResolvers.set(tabId!, (result: DetailProcessResult) => {
 				browser.tabs.onRemoved.removeListener(handler);
+				clearTimeout(timer);
+				resolvedResult = result;
+				resolve();
+			});
+			const timer = setTimeout(() => {
+				timedOut = true;
+				browser.tabs.onRemoved.removeListener(handler);
+				captchaResolvers.delete(tabId!);
 				resolve();
 			}, 60000);
 		});
-		return true;
+		if (resolvedResult) return resolvedResult;
+		if (timedOut) return { success: false, reason: 'timeout (60s)' };
+		return { success: true };
 	} catch {
 		if (tabId) {
 			try { await browser.tabs.remove(tabId); } catch {}
 		}
-		return false;
+		return { success: false, reason: 'exception' };
 	}
 }
 
-async function runDetailTaskQueue(): Promise<void> {
-	if (isDetailQueueRunning) return;
-	isDetailQueueRunning = true;
+	async function runDetailTaskQueue(): Promise<void> {
+		if (isDetailQueueRunning) return;
+		isDetailQueueRunning = true;
 
-	try {
-		const urls = await fetchDetailTasks();
-		if (urls.length === 0) {
+		try {
+			const pauseState = await readDetailQueuePauseState();
+			if (pauseState.paused) {
+				console.log('[JobSniper] Detail queue paused:', pauseState.reason || 'paused');
+				isDetailQueueRunning = false;
+				return;
+			}
+
+			const tasks = await fetchDetailTasks();
+			if (tasks.length === 0) {
+				isDetailQueueRunning = false;
+				return;
+			}
+
+		const results = await readResults();
+		const doneUrls = new Set(
+			results
+				.filter((r: any) => r?.status === 'done' && r?.url)
+				.map((r: any) => normalizeZhilianDetailUrl(r.url))
+		);
+		const doneJobIds = new Set(
+			results
+				.filter((r: any) => r?.status === 'done' && (r?.job_id || r?.url))
+				.map((r: any) => r.job_id || getZhilianDetailJobId(r.url))
+				.filter(Boolean)
+		);
+		const doneLocks = await readDetailLockMap(DETAIL_DONE_LOCKS_KEY);
+		const inflightLocks = await readActiveInflightLocks(Date.now());
+		const pendingTasks = tasks.filter(t => {
+			const normalizedUrl = normalizeZhilianDetailUrl(t.url);
+			const jobId = t.jobId || getZhilianDetailJobId(t.url);
+			const lockKey = getDetailTaskLockKey(t);
+			return !doneUrls.has(normalizedUrl)
+				&& !(jobId && doneJobIds.has(jobId))
+				&& !doneLocks[lockKey]
+				&& !inflightLocks[lockKey];
+		});
+		if (pendingTasks.length === 0) {
 			isDetailQueueRunning = false;
 			return;
 		}
 
-		console.log('[JobSniper] Processing', urls.length, 'detail URLs');
-		for (const url of urls) {
-			await processSingleDetailUrl(url);
-			await new Promise(r => setTimeout(r, 2000));
+		console.log('[JobSniper] Processing', pendingTasks.length, 'of', tasks.length, 'tasks');
+		for (const task of pendingTasks) {
+			const claimed = await claimDetailTask(task);
+			if (!claimed) {
+				console.log('[JobSniper] Skip claimed task', task.index + 1, '/', tasks.length);
+				continue;
+			}
+				console.log('[JobSniper] Task', task.index + 1, '/', tasks.length);
+				const result = await processSingleDetailUrl(task.url);
+				await writeResult(task.index, task.url, result.success ? 'done' : 'failed', result.reason, task.keyword, task.jobId);
+				await completeDetailTask(task, result.success);
+				if (!result.success && result.reason === 'captcha detected') {
+					// Stop immediately when captcha is detected to avoid burning more requests.
+					await setDetailQueuePaused(true, 'captcha detected');
+					break;
+				}
+				await new Promise(r => setTimeout(r, 2000));
+			}
+		} catch (err) {
+			console.error('[JobSniper] Queue error:', err);
+		}
+	isDetailQueueRunning = false;
+}
+
+async function readResults(): Promise<any[]> {
+	try {
+		const resp = await fetch(`file:///D:/Downloads/${DETAIL_RESULTS_FILE}`);
+		if (!resp.ok) return [];
+		const text = await resp.text();
+		return text.split('\n')
+			.filter((line: string) => line.trim())
+			.map((line: string) => { try { return JSON.parse(line); } catch { return null; } })
+			.filter((r: any) => r !== null);
+	} catch {
+		return [];
+	}
+}
+
+async function writeResult(taskIndex: number, url: string, status: string, error?: string, keyword?: string, jobId?: string): Promise<void> {
+	const record: any = {
+		task_index: taskIndex,
+		url,
+		normalized_url: normalizeZhilianDetailUrl(url),
+		job_id: jobId || getZhilianDetailJobId(url),
+		keyword,
+		status,
+		recorded_at: new Date().toISOString()
+	};
+	if (error) record.error = error;
+	try {
+		const existing = await readResults();
+		existing.push(record);
+		const content = existing.map((r: any) => JSON.stringify(r)).join('\n') + '\n';
+		await browser.downloads.download({
+			url: `data:application/x-ndjson;charset=utf-8,${encodeURIComponent(content)}`,
+			filename: DETAIL_RESULTS_FILE,
+			conflictAction: 'overwrite' as any,
+			saveAs: false
+		});
+	} catch {}
+}
+
+		async function startDetailQueuePolling(): Promise<void> {
+			const pauseState = await readDetailQueuePauseState();
+			if (pauseState.paused) {
+				console.log('[JobSniper] Detail queue polling not started: paused:', pauseState.reason || 'paused');
+				// Keep the badge visible across restarts.
+				try { await chrome.action.setBadgeBackgroundColor({ color: '#b91c1c' }); } catch {}
+				try { await chrome.action.setBadgeText({ text: 'CAP' }); } catch {}
+				return;
+			}
+			console.log('[JobSniper] Detail queue polling started (alarms, 5s)');
+			chrome.alarms.create('detailQueuePoll', { periodInMinutes: 5 / 60 });
+			runDetailTaskQueue();
 		}
 
-		// Clear task file
+	async function readListResults(): Promise<any[]> {
 		try {
+			const resp = await fetch(`file:///D:/Downloads/${LIST_RESULTS_FILE}`);
+			if (!resp.ok) return [];
+			const text = await resp.text();
+			return text.split('\n')
+				.filter((line: string) => line.trim())
+				.map((line: string) => { try { return JSON.parse(line); } catch { return null; } })
+				.filter((r: any) => r !== null);
+		} catch {
+			return [];
+		}
+	}
+
+	async function writeListResult(task: ListTask, status: string, error?: string, fileName?: string): Promise<void> {
+		const record: any = {
+			task_index: task.index,
+			task_id: task.taskId,
+			url: task.url,
+			normalized_url: normalizeZhilianListUrl(task.url),
+			keyword: task.keyword,
+			status,
+			recorded_at: new Date().toISOString()
+		};
+		if (fileName) record.file_name = fileName;
+		if (error) record.error = error;
+		try {
+			const existing = await readListResults();
+			existing.push(record);
+			const content = existing.map((r: any) => JSON.stringify(r)).join('\n') + '\n';
 			await browser.downloads.download({
-				url: 'data:text/plain;charset=utf-8,',
-				filename: 'zhilian_detail_tasks.jsonl',
+				url: `data:application/x-ndjson;charset=utf-8,${encodeURIComponent(content)}`,
+				filename: LIST_RESULTS_FILE,
 				conflictAction: 'overwrite' as any,
 				saveAs: false
 			});
 		} catch {}
-	} catch (err) {
-		console.error('[JobSniper] Queue error:', err);
 	}
-	isDetailQueueRunning = false;
-}
 
-function startDetailQueuePolling(): void {
-	if (detailQueueTimer) return;
-	console.log('[JobSniper] Detail queue polling started (5s interval)');
-	detailQueueTimer = setInterval(() => runDetailTaskQueue(), 5000);
-	runDetailTaskQueue();
-}
+	async function waitForListHarvestOrTimeout(tabId: number, timeoutMs: number = 10 * 60 * 1000): Promise<ListProcessResult> {
+		let timedOut = false;
+		let resolvedResult: ListProcessResult | undefined;
+		await new Promise<void>((resolve) => {
+			const handler = (removedId: number) => {
+				if (removedId === tabId) {
+					browser.tabs.onRemoved.removeListener(handler);
+					clearTimeout(timer);
+					listHarvestResolvers.delete(tabId);
+					if (!resolvedResult) resolvedResult = { success: false, reason: 'tab closed' };
+					resolve();
+				}
+			};
+			browser.tabs.onRemoved.addListener(handler);
+			listHarvestResolvers.set(tabId, (result: ListProcessResult) => {
+				browser.tabs.onRemoved.removeListener(handler);
+				clearTimeout(timer);
+				resolvedResult = result;
+				resolve();
+			});
+			const timer = setTimeout(() => {
+				timedOut = true;
+				browser.tabs.onRemoved.removeListener(handler);
+				listHarvestResolvers.delete(tabId);
+				resolve();
+			}, timeoutMs);
+		});
+		if (resolvedResult) return resolvedResult;
+		if (timedOut) return { success: false, reason: `timeout (${Math.floor(timeoutMs / 1000)}s)` };
+		return { success: false, reason: 'unknown' };
+	}
 
-async function collectSingleZhilianDetail(job: { index: number; title: string; url: string }, debug: boolean): Promise<any> {
-	let tabId: number | undefined;
-	const requestedJobUrl = job.url.split('?')[0];
-	try {
+	async function processSingleListUrl(url: string): Promise<ListProcessResult> {
+		let tabId: number | undefined;
+		try {
+			const tab = await browser.tabs.create({ url, active: false });
+			tabId = tab.id;
+			if (!tabId) return { success: false, reason: 'no tab id' };
+			await waitForTabComplete(tabId, 30000);
+			await ensureContentScriptLoadedInBackground(tabId);
+			const result = await waitForListHarvestOrTimeout(tabId);
+			return result;
+		} catch (err) {
+			return { success: false, reason: err instanceof Error ? err.message : String(err) };
+		} finally {
+			if (tabId) {
+				try { await browser.tabs.remove(tabId); } catch {}
+			}
+		}
+	}
+
+	async function runListTaskQueue(): Promise<void> {
+		if (isListQueueRunning) return;
+		isListQueueRunning = true;
+		try {
+			const tasks = await fetchListTasks();
+			if (tasks.length === 0) {
+				isListQueueRunning = false;
+				return;
+			}
+
+			const results = await readListResults();
+			const doneTaskIds = new Set(
+				results
+					.filter((r: any) => r?.status === 'done' && r?.task_id)
+					.map((r: any) => String(r.task_id))
+			);
+			const doneUrls = new Set(
+				results
+					.filter((r: any) => r?.status === 'done' && r?.url)
+					.map((r: any) => normalizeZhilianListUrl(r.url))
+			);
+			const doneLocks = await readDetailLockMap(LIST_DONE_LOCKS_KEY);
+			const inflightLocks = await readActiveListInflightLocks(Date.now());
+			const pendingTasks = tasks.filter(t => {
+				const lockKey = getListTaskLockKey(t);
+				const normalizedUrl = normalizeZhilianListUrl(t.url);
+				return !(t.taskId && doneTaskIds.has(String(t.taskId)))
+					&& !doneUrls.has(normalizedUrl)
+					&& !doneLocks[lockKey]
+					&& !inflightLocks[lockKey];
+			});
+			if (pendingTasks.length === 0) {
+				isListQueueRunning = false;
+				return;
+			}
+
+			console.log('[JobSniper] List queue processing', pendingTasks.length, 'of', tasks.length, 'tasks');
+			for (const task of pendingTasks) {
+				const claimed = await claimListTask(task);
+				if (!claimed) {
+					console.log('[JobSniper] List skip claimed task', task.index + 1, '/', tasks.length);
+					continue;
+				}
+				console.log('[JobSniper] List task', task.index + 1, '/', tasks.length);
+				const result = await processSingleListUrl(task.url);
+				await writeListResult(task, result.success ? 'done' : 'failed', result.reason, result.fileName);
+				await completeListTask(task, result.success);
+				await new Promise(r => setTimeout(r, 2000));
+			}
+		} catch (err) {
+			console.error('[JobSniper] List queue error:', err);
+		}
+		isListQueueRunning = false;
+	}
+
+	function startListQueuePolling(): void {
+		console.log('[JobSniper] List queue polling started (alarms, 5s)');
+		chrome.alarms.create('listQueuePoll', { periodInMinutes: 5 / 60 });
+		runListTaskQueue();
+	}
+
+	async function collectSingleZhilianDetail(job: { index: number; title: string; url: string }, debug: boolean): Promise<any> {
+		let tabId: number | undefined;
+		const requestedJobUrl = job.url.split('?')[0];
+		try {
 		const tab = await browser.tabs.create({ url: job.url, active: false });
 		tabId = tab.id;
 		if (!tabId) throw new Error('Failed to create detail tab');
@@ -417,8 +951,19 @@ async function initialize() {
 		// Enable Origin header for YouTube innertube API requests
 		await enableYouTubeInnertubeRule();
 
-		// Start detail task queue polling for Zhilian job detail collection
-		startDetailQueuePolling();
+			// JobSniper: alarm-driven detail queue polling
+			chrome.alarms.onAlarm.addListener((alarm) => {
+				if (alarm.name === 'detailQueuePoll') {
+					runDetailTaskQueue();
+				}
+				if (alarm.name === 'listQueuePoll') {
+					runListTaskQueue();
+				}
+			});
+
+				// Start detail task queue polling for Zhilian job detail collection
+				await startDetailQueuePolling();
+				startListQueuePolling();
 
 		// Set up action popup based on openBehavior setting
 		await updateActionPopup();
@@ -508,10 +1053,47 @@ browser.runtime.onMessage.addListener((request: unknown) => {
 browser.runtime.onMessage.addListener((request: unknown, sender: browser.Runtime.MessageSender, sendResponse: (response?: any) => void): true | undefined => {
 	if (typeof request === 'object' && request !== null) {
 		const typedRequest = request as { action: string; isActive?: boolean; hasHighlights?: boolean; tabId?: number; text?: string; section?: string; readerUrl?: string };
-		
-		if (typedRequest.action === 'copy-to-clipboard' && typedRequest.text) {
-			// Use content script to copy to clipboard
-			browser.tabs.query({active: true, currentWindow: true}).then(async (tabs) => {
+
+				if (typedRequest.action === 'runDetailTaskQueue') {
+					// Manual wake/resume entrypoint (e.g. clipper_detail_queue=1).
+					// If previously paused due to captcha, explicitly resume here.
+					setDetailQueuePaused(false)
+						.then(() => runDetailTaskQueue())
+						.then(() => sendResponse({ success: true }))
+						.catch((error) => sendResponse({
+							success: false,
+							error: error instanceof Error ? error.message : String(error)
+						}));
+					return true;
+				}
+
+			if (typedRequest.action === 'runListTaskQueue') {
+				runListTaskQueue()
+					.then(() => sendResponse({ success: true }))
+					.catch((error) => sendResponse({
+						success: false,
+						error: error instanceof Error ? error.message : String(error)
+					}));
+				return true;
+			}
+
+			if (typedRequest.action === 'zhilianListHarvestDone') {
+				const tabId = sender.tab?.id;
+				const resolver = tabId ? listHarvestResolvers.get(tabId) : undefined;
+				if (resolver) {
+					resolver({
+						success: Boolean((typedRequest as any).success),
+						reason: (typedRequest as any).error || undefined,
+						fileName: (typedRequest as any).fileName || undefined
+					});
+				}
+				sendResponse({ success: true });
+				return true;
+			}
+
+			if (typedRequest.action === 'copy-to-clipboard' && typedRequest.text) {
+				// Use content script to copy to clipboard
+				browser.tabs.query({active: true, currentWindow: true}).then(async (tabs) => {
 				const currentTab = tabs[0];
 				if (currentTab && currentTab.id) {
 					try {
@@ -859,6 +1441,28 @@ browser.runtime.onMessage.addListener((request: unknown, sender: browser.Runtime
 			}
 			return true;
 		}
+
+			if (typedRequest.action === "captchaDetected") {
+				const tabId = sender.tab?.id;
+				if (tabId) {
+					console.log('[JobSniper] Captcha detected, bringing tab to foreground:', tabId);
+					(async () => {
+						// Notify user: bring to front + action badge; pause the queue.
+						browser.tabs.update(tabId, { active: true }).catch(() => {});
+						browser.windows.update(sender.tab!.windowId!, { focused: true }).catch(() => {});
+						await setDetailQueuePaused(true, 'captcha detected', tabId);
+
+						const resolveCaptcha = captchaResolvers.get(tabId);
+						if (resolveCaptcha) {
+							resolveCaptcha({ success: false, reason: 'captcha detected' });
+						}
+						sendResponse({ success: true });
+					})().catch(() => sendResponse({ success: true }));
+				} else {
+					sendResponse({ success: false, error: 'No sender tab' });
+				}
+				return true;
+			}
 
 		if (typedRequest.action === "zhilianCollectDetailTest") {
 			const jobs = ((typedRequest as any).jobs || []) as Array<{ index: number; title: string; url: string }>;

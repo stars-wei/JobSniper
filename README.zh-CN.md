@@ -157,9 +157,9 @@ https://www.zhaopin.com/?jl={city_id}&clipper_keyword_discovery=1&clipper_debug=
 zhilian_keyword_discovery_{timestamp}.md
 ```
 
-### `launch_zhilian_job_list_collection(keyword: str, city_id: str = "538", pages: str = "auto", test: bool = false, debug: bool = true)`
+### `launch_zhilian_job_list_collection(keyword: str, city_id: str = "538", pages: str = "auto", test: bool = false, debug: bool = true, wake_browser: bool = false)`
 
-采集智联某个职业关键词下的岗位列表。工具会启动 Windows Chrome，加载 JobSniper 内置的 Joblens 扩展，并打开智联搜索 URL。
+采集智联某个职业关键词下的岗位列表（后台队列模式）。该工具会把任务写入 `D:\\Downloads\\zhilian_list_tasks.jsonl`，由 Joblens 扩展后台执行采集，并由监视脚本自动归档产物。
 
 生成的 URL 包含：
 
@@ -168,8 +168,9 @@ zhilian_keyword_discovery_{timestamp}.md
 - `clipper_pages={pages}`
 - `clipper_keyword_b64u={base64url(keyword)}`
 - 可选的 `clipper_test=1` 和 `clipper_debug=1`
+- `clipper_list_queue=1`（队列模式）
 
-工具会返回采集 URL、Chrome 启动命令、预期下载目录和建议归档调用。
+若 `wake_browser=true`，会额外打开 `clipper_list_queue_wake=1` 唤醒页以立即触发一次队列执行。
 
 ### `launch_zhilian_job_detail_collection(job_url: str, keyword: str = "", debug: bool = true)`
 

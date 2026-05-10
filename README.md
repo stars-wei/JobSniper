@@ -156,9 +156,9 @@ Output:
 zhilian_keyword_discovery_{timestamp}.md
 ```
 
-### `launch_zhilian_job_list_collection(keyword: str, city_id: str = "538", pages: str = "auto", test: bool = false, debug: bool = true)`
+### `launch_zhilian_job_list_collection(keyword: str, city_id: str = "538", pages: str = "auto", test: bool = false, debug: bool = true, wake_browser: bool = false)`
 
-Collects the Zhilian job list under one occupation keyword. It launches Windows Chrome with the embedded Joblens extension and opens a Zhilian search URL.
+Collects the Zhilian job list under one occupation keyword via the background queue. It appends a task to `D:\\Downloads\\zhilian_list_tasks.jsonl`, then the Joblens extension processes it in the background and the monitor script archives the output automatically.
 
 The generated URL includes:
 - `clipper_auto=1`
@@ -166,8 +166,9 @@ The generated URL includes:
 - `clipper_pages={pages}`
 - `clipper_keyword_b64u={base64url(keyword)}`
 - optional `clipper_test=1` and `clipper_debug=1`
+- `clipper_list_queue=1` (queue mode)
 
-The tool returns the collection URL, Chrome command, expected download directory, and suggested archive call.
+If `wake_browser=true`, it also opens a lightweight wake page (`clipper_list_queue_wake=1`) to trigger a queue run immediately.
 
 ### `launch_zhilian_job_detail_collection(job_url: str, keyword: str = "", debug: bool = true)`
 

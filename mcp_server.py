@@ -9,8 +9,10 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 import queue
 import threading
+import hashlib
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -32,6 +34,96 @@ JOBLENS_PATH = BASE_DIR / "integrations" / "joblens"
 JOBLENS_DIST_PATH = JOBLENS_PATH / "dist"
 DOWNLOADS_PATH = "/mnt/d/Downloads"
 WINDOWS_CHROME_PATH = "/mnt/c/Program Files/Google/Chrome/Application/chrome.exe"
+MONITOR_SCRIPT = Path("/home/xstars/.local/bin/watch_downloads.sh")
+LIST_MONITOR_SCRIPT = Path("/home/xstars/.local/bin/watch_job_list.sh")
+DETAIL_WAKE_LOCK = Path("/tmp/jobsniper_detail_queue_wake")
+DETAIL_WAKE_DEBOUNCE_SECONDS = 10
+LIST_WAKE_LOCK = Path("/tmp/jobsniper_list_queue_wake")
+LIST_WAKE_DEBOUNCE_SECONDS = 10
+
+# ----------------------------------------------------------------
+# 监控脚本管理
+# ----------------------------------------------------------------
+
+def _start_monitor_if_needed() -> None:
+    """启动下载目录监控脚本，如果未在运行"""
+    if not MONITOR_SCRIPT.exists():
+        return
+    lock_file = Path("/tmp/watch_downloads/lock")
+    # 检查是否已在运行
+    if lock_file.exists():
+        try:
+            old_pid = int(lock_file.read_text().strip())
+            os.kill(old_pid, 0)  # 信号0仅检测进程是否存在
+            return  # 已在运行
+        except (ValueError, OSError):
+            pass  # 锁文件过期，继续启动
+    try:
+        subprocess.Popen(
+            ["bash", str(MONITOR_SCRIPT)],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except Exception:
+        pass
+
+def _start_list_monitor_if_needed() -> None:
+    """启动岗位列表队列监控脚本（如果未在运行）。"""
+    if not LIST_MONITOR_SCRIPT.exists():
+        return
+    lock_file = Path("/tmp/watch_job_list/lock")
+    if lock_file.exists():
+        try:
+            old_pid = int(lock_file.read_text().strip())
+            os.kill(old_pid, 0)
+            return
+        except (ValueError, OSError):
+            pass
+    try:
+        subprocess.Popen(
+            ["bash", str(LIST_MONITOR_SCRIPT)],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            start_new_session=True,
+        )
+    except Exception:
+        pass
+
+def _launch_detail_queue_wake(wake_url: str) -> tuple[bool, str | None, bool]:
+    """Launch Chrome wake URL unless another detail wake happened recently."""
+    now = time.time()
+    try:
+        last_wake = float(DETAIL_WAKE_LOCK.read_text().strip()) if DETAIL_WAKE_LOCK.exists() else 0.0
+    except Exception:
+        last_wake = 0.0
+
+    if now - last_wake < DETAIL_WAKE_DEBOUNCE_SECONDS:
+        return False, None, True
+
+    try:
+        DETAIL_WAKE_LOCK.write_text(str(now), encoding="utf-8")
+        subprocess.Popen([WINDOWS_CHROME_PATH, wake_url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return True, None, False
+    except Exception as exc:
+        return False, str(exc), False
+
+def _launch_list_queue_wake(wake_url: str) -> tuple[bool, str | None, bool]:
+    """Launch Chrome wake URL unless another list wake happened recently."""
+    now = time.time()
+    try:
+        last_wake = float(LIST_WAKE_LOCK.read_text().strip()) if LIST_WAKE_LOCK.exists() else 0.0
+    except Exception:
+        last_wake = 0.0
+
+    if now - last_wake < LIST_WAKE_DEBOUNCE_SECONDS:
+        return False, None, True
+
+    try:
+        LIST_WAKE_LOCK.write_text(str(now), encoding="utf-8")
+        subprocess.Popen([WINDOWS_CHROME_PATH, wake_url], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return True, None, False
+    except Exception as exc:
+        return False, str(exc), False
 
 # ----------------------------------------------------------------
 # Resources: 暴露本地情报数据
@@ -319,12 +411,15 @@ def launch_zhilian_job_list_collection(
     pages: str = "auto",
     test: bool = False,
     debug: bool = True,
+    wake_browser: bool = False,
 ) -> str:
     """
-    采集智联某个职业关键词下的岗位列表。
+    采集智联某个职业关键词下的岗位列表。通过写入任务文件，由 Chrome 扩展后台采集。
     """
     if not keyword.strip():
         return _json_response({"ok": False, "error": "keyword must not be empty"})
+
+    _start_list_monitor_if_needed()
 
     params: dict[str, str] = {
         "kw": keyword,
@@ -335,14 +430,45 @@ def launch_zhilian_job_list_collection(
         "clipper_pages": str(pages),
         "clipper_keyword": keyword,
         "clipper_keyword_b64u": _base64url_utf8(keyword),
+        "clipper_list_queue": "1",
     }
     if test:
         params["clipper_test"] = "1"
     if debug:
-        params["clipper_debug"] = "1"
+        params["debug"] = "1"
 
     collection_url = f"https://sou.zhaopin.com/?{urlencode(params)}"
-    return _launch_zhilian_with_url(collection_url, keyword, "zhilian_job_list")
+
+    # Write to list task queue file for the Chrome extension to pick up
+    task_file = Path(DOWNLOADS_PATH) / "zhilian_list_tasks.jsonl"
+    task_id = hashlib.sha1(collection_url.encode("utf-8")).hexdigest()[:16]
+    task_line = json.dumps({"task_id": task_id, "url": collection_url, "keyword": keyword.strip()}) + "\n"
+    try:
+        with open(task_file, "a", encoding="utf-8") as f:
+            f.write(task_line)
+        wake_url = None
+        chrome_launched = False
+        chrome_error = None
+        wake_debounced = False
+        if wake_browser:
+            wake_params = {"clipper_list_queue_wake": "1"}
+            if debug:
+                wake_params["debug"] = "1"
+            wake_url = f"https://www.zhaopin.com/?{urlencode(wake_params)}"
+            chrome_launched, chrome_error, wake_debounced = _launch_list_queue_wake(wake_url)
+        return _json_response({
+            "ok": True,
+            "task_id": task_id,
+            "url": collection_url,
+            "task_file": str(task_file),
+            "wake_url": wake_url,
+            "chrome_launched": chrome_launched,
+            "chrome_error": chrome_error,
+            "wake_debounced": wake_debounced,
+            "message": "Task enqueued. Chrome extension alarm polling will process it in background.",
+        })
+    except Exception as exc:
+        return _json_response({"ok": False, "error": f"Failed to write task file: {exc}"})
 
 @mcp.tool()
 def launch_zhilian_job_menu_collection(
@@ -357,7 +483,7 @@ def launch_zhilian_job_menu_collection(
         "clipper_keyword_discovery": "1",
     }
     if debug:
-        params["clipper_debug"] = "1"
+        params["debug"] = "1"
 
     collection_url = f"https://www.zhaopin.com/?{urlencode(params)}"
     return _launch_zhilian_with_url(collection_url, "job_menu", "zhilian_job_menu")
@@ -367,6 +493,9 @@ def launch_zhilian_job_detail_collection(
     job_url: str,
     keyword: str = "",
     debug: bool = True,
+    save_html: bool = False,
+    save_json: bool = False,
+    wake_browser: bool = False,
 ) -> str:
     """
     采集智联单个岗位详情页。通过写入任务文件，由 Chrome 扩展后台静默采集。
@@ -380,14 +509,30 @@ def launch_zhilian_job_detail_collection(
     if parsed.scheme not in {"http", "https"} or "zhaopin.com" not in parsed.netloc:
         return _json_response({"ok": False, "error": "job_url must be a zhaopin.com http(s) URL"})
 
+    _start_monitor_if_needed()
+
     params = dict(parse_qsl(parsed.query, keep_blank_values=True))
-    params["clipper_job_detail"] = "1"
+    params["detail"] = "1"
     if keyword.strip():
-        params["clipper_keyword"] = keyword.strip()
-        params["clipper_keyword_b64u"] = _base64url_utf8(keyword.strip())
+        params["kw"] = keyword.strip()
+        params["kw64"] = _base64url_utf8(keyword.strip())
     if debug:
-        params["clipper_debug"] = "1"
+        params["debug"] = "1"
+    if save_html:
+        params["html"] = "1"
+    else:
+        params["html"] = "0"
+    if save_json:
+        params["json"] = "1"
+    else:
+        params["json"] = "0"
     detail_url = urlunparse(parsed._replace(query=urlencode(params)))
+    wake_url = None
+    if wake_browser:
+        wake_params = {"clipper_detail_queue": "1"}
+        if debug:
+            wake_params["debug"] = "1"
+        wake_url = f"https://www.zhaopin.com/?{urlencode(wake_params)}"
 
     # Write to detail task queue file for the Chrome extension to pick up
     task_file = Path(DOWNLOADS_PATH) / "zhilian_detail_tasks.jsonl"
@@ -395,11 +540,20 @@ def launch_zhilian_job_detail_collection(
     try:
         with open(task_file, "a", encoding="utf-8") as f:
             f.write(task_line)
+        chrome_launched = False
+        chrome_error = None
+        wake_debounced = False
+        if wake_url:
+            chrome_launched, chrome_error, wake_debounced = _launch_detail_queue_wake(wake_url)
         return _json_response({
             "ok": True,
             "url": detail_url,
             "task_file": str(task_file),
-            "message": "Task enqueued. Chrome extension will process it in background.",
+            "wake_url": wake_url,
+            "chrome_launched": chrome_launched,
+            "chrome_error": chrome_error,
+            "wake_debounced": wake_debounced,
+            "message": "Task enqueued. Chrome extension alarm polling will process it in background.",
         })
     except Exception as exc:
         return _json_response({"ok": False, "error": f"Failed to write task file: {exc}"})

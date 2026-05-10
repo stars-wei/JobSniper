@@ -11,7 +11,7 @@ declare global {
     const myGeneration = window.obsidianClipperGeneration;
     const harvestedJobs = new Map<string, any>();
     const isZhilianPage = window.location.hostname.includes('zhaopin.com');
-    const debugEnabled = window.location.href.includes("clipper_debug=1");
+    const debugEnabled = window.location.href.includes("debug=1");
     const harvesterVersion = "v1.10.0";
     const harvestSessionKey = "zhilianHarvesterSessionV1";
     const keywordBatchSessionKey = "zhilianKeywordBatchSessionV1";
@@ -176,12 +176,27 @@ declare global {
 
     function isDirectJobDetailMode(): boolean {
         const params = new URLSearchParams(window.location.search);
-        return params.get("clipper_job_detail") === "1";
+        return params.get("detail") === "1";
+    }
+
+    function isDetailQueueWakeMode(): boolean {
+        const params = new URLSearchParams(window.location.search);
+        return params.get("clipper_detail_queue") === "1";
+    }
+
+    function isListQueueMode(): boolean {
+        const params = new URLSearchParams(window.location.search);
+        return params.get("clipper_list_queue") === "1";
+    }
+
+    function isListQueueWakeMode(): boolean {
+        const params = new URLSearchParams(window.location.search);
+        return params.get("clipper_list_queue_wake") === "1";
     }
 
     function getDirectJobDetailKeyword(): string {
         const params = new URLSearchParams(window.location.search);
-        return cleanText(params.get("clipper_keyword") || "job_detail");
+        return cleanText(params.get("kw") || "job_detail");
     }
 
     function getBatchKeywordsParam(): string {
@@ -251,9 +266,7 @@ declare global {
     }
 
     function getExplicitKeywordFromParams(params: URLSearchParams): string {
-        return decodeBase64Utf8(params.get("clipper_keyword_b64u"))
-            || decodeBase64Utf8(params.get("clipper_keyword_b64"))
-            || decodeMaybeEncodedKeyword(params.get("clipper_keyword"))
+        return decodeBase64Utf8(params.get("kw64"))
             || decodeMaybeEncodedKeyword(params.get("kw"));
     }
 
@@ -332,9 +345,8 @@ declare global {
         url.searchParams.set("cityId", cityId);
         if (keyword && keyword !== "Unknown") {
             url.searchParams.set("kw", keyword);
-            url.searchParams.set("clipper_keyword", keyword);
             const keywordB64 = encodeBase64Utf8(keyword);
-            if (keywordB64) url.searchParams.set("clipper_keyword_b64u", keywordB64);
+            if (keywordB64) url.searchParams.set("kw64", keywordB64);
         }
         if (url.searchParams.get("city") === "上海") {
             url.searchParams.delete("city");
@@ -383,9 +395,8 @@ declare global {
         url.searchParams.set("cityId", cityId);
         url.searchParams.set("clipper_auto", "1");
         url.searchParams.set("clipper_city", cityId);
-        url.searchParams.set("clipper_keyword", keyword);
         const keywordB64 = encodeBase64Utf8(keyword);
-        if (keywordB64) url.searchParams.set("clipper_keyword_b64u", keywordB64);
+        if (keywordB64) url.searchParams.set("kw64", keywordB64);
 
         const pageParam = new URLSearchParams(window.location.search);
         if (!pageParam.has("clipper_pages") || pageParam.get("clipper_pages") === "auto") {
@@ -400,7 +411,7 @@ declare global {
         }
 
         if (debugEnabled) {
-            url.searchParams.set("clipper_debug", "1");
+            url.searchParams.set("debug", "1");
         }
 
         if (isHarvestTestMode()) {
@@ -1518,6 +1529,13 @@ declare global {
 
     function parseZhilianDetailPage(): ZhilianDetailResult {
         try {
+            if (isCaptchaPage()) {
+                return {
+                    status: "failed",
+                    jobUrl: window.location.href.split("?")[0],
+                    error: "security verification page detected"
+                };
+            }
             const initialState = parseZhilianInitialState();
             const initialStateDetail = initialState ? parseDetailFromInitialState(initialState) : null;
             return {
@@ -1743,7 +1761,11 @@ declare global {
         const rawHtmlFileName = `ZHILIAN_DETAIL_RAW_${timestamp}_${jobId}.html`;
         const manifestFileName = `ZHILIAN_DETAIL_MANIFEST_${timestamp}_${jobId}.json`;
 
-        if (detail.raw?.detailHtml) {
+        const urlParams = new URLSearchParams(window.location.search);
+        const saveHtml = urlParams.get("html") === "1";
+        const saveJson = urlParams.get("json") === "1";
+
+        if (saveHtml && detail.raw?.detailHtml) {
             await downloadTextFile(rawHtmlFileName, detail.raw.detailHtml, "text/html", true);
             detail.raw.detailHtmlFileName = rawHtmlFileName;
             delete detail.raw.detailHtml;
@@ -1755,12 +1777,28 @@ declare global {
             "text/markdown",
             true
         );
-        await downloadTextFile(
-            manifestFileName,
-            JSON.stringify({ metadata, markdownFileName, rawHtmlFileName, job, detail }, null, 2),
-            "application/json",
-            true
-        );
+
+        if (saveJson) {
+            await downloadTextFile(
+                manifestFileName,
+                JSON.stringify({ metadata, markdownFileName, rawHtmlFileName, job, detail }, null, 2),
+                "application/json",
+                true
+            );
+        }
+
+        // Check for captcha on failure
+        if (!markdownResponse?.success || detail.status === "failed") {
+            const isCaptcha = isCaptchaPage();
+            if (isCaptcha) {
+                overlay.style.background = "red";
+                overlay.innerText = `⚠️ 验证码拦截！\n请手动完成人机验证`;
+                playCaptchaAlert();
+                browser.runtime.sendMessage({ action: "captchaDetected" }).catch(() => {});
+                // Don't close tab — let user complete captcha manually
+                return;
+            }
+        }
 
         if (markdownResponse?.success) {
             overlay.style.background = "green";
@@ -1776,6 +1814,36 @@ declare global {
                 window.close();
             });
         }, 1500);
+    }
+
+    function isCaptchaPage(): boolean {
+        const bodyText = document.body.innerText || "";
+        const title = document.title || "";
+        const url = window.location.href;
+        const sample = bodyText.slice(0, 4000);
+        return (
+            /验证码|人机验证|安全验证|拦截/.test(title) ||
+            /验证码|人机验证|安全验证|请完成验证|点击验证|正在验证连接安全性|请勾选下方复选框|验证完成后.*重定向|Tencent Cloud EdgeOne|Protected by Tencent Cloud EdgeOne/i.test(sample) ||
+            /captcha|verify|challenge/i.test(url)
+        );
+    }
+
+    function playCaptchaAlert(): void {
+        try {
+            const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
+            // Play three beeps: high-high-low
+            [800, 800, 600].forEach((freq, i) => {
+                const osc = ctx.createOscillator();
+                const gain = ctx.createGain();
+                osc.type = "square";
+                osc.frequency.value = freq;
+                gain.gain.value = 0.3;
+                osc.connect(gain);
+                gain.connect(ctx.destination);
+                osc.start(ctx.currentTime + i * 0.3);
+                osc.stop(ctx.currentTime + i * 0.3 + 0.25);
+            });
+        } catch {}
     }
 
     async function exportDetailMarkdownArtifacts(jobs: any[], metadata: any, isAuto: boolean) {
@@ -2326,6 +2394,7 @@ declare global {
             }
 
             const response = await downloadTextFile(fileName, content, "text/markdown", isAuto);
+            const isQueueMode = isAuto && !isBatchMode && isListQueueMode();
 
             if (response?.success && isAuto && overlay) {
                     const completedCount = harvestedJobs.size;
@@ -2333,13 +2402,30 @@ declare global {
                     overlay.innerText = isBatchMode
                         ? `✅ 当前关键词完成\n${keyword}\n成功收割 ${completedCount} 个情报原子。`
                         : `✅ 完成！成功收割 ${completedCount} 个情报原子。`;
-                    if (!isBatchMode) {
+                    if (!isBatchMode && !isQueueMode) {
                         if (window.opener) {
                             setTimeout(() => { window.close(); }, 2000);
                         } else {
                             overlay.innerText += "\n当前标签页不是脚本打开的，请手动关闭。";
                         }
                     }
+            }
+
+            if (isQueueMode) {
+                try {
+                    await browser.runtime.sendMessage({
+                        action: "zhilianListHarvestDone",
+                        success: Boolean(response?.success),
+                        keyword,
+                        fileName,
+                        error: response?.success ? undefined : (response?.error || "download failed")
+                    });
+                } catch (e) {}
+                try {
+                    await browser.runtime.sendMessage({ action: "closeCurrentTab" });
+                } catch {
+                    try { window.close(); } catch {}
+                }
             }
             resolve();
         });
@@ -2367,6 +2453,62 @@ declare global {
                 overlay.innerText = `关键词发现失败：${e instanceof Error ? e.message : String(e)}`;
             }
         }, 2500);
+    }
+
+    if (isDetailQueueWakeMode() && isZhilianPage) {
+        const overlay = document.createElement('div');
+        overlay.style.cssText = 'position:fixed;top:10px;right:10px;background:#2563eb;color:white;padding:20px;z-index:999999;font-weight:bold;border-radius:10px;box-shadow:0 0 20px rgba(0,0,0,0.5);white-space:pre-line;';
+        overlay.innerText = `智联详情队列唤醒 (${harvesterVersion})...`;
+        document.body.appendChild(overlay);
+
+        setTimeout(async () => {
+            try {
+                const response = await browser.runtime.sendMessage({ action: "runDetailTaskQueue" }) as any;
+                if (response?.success) {
+                    overlay.style.background = "green";
+                    overlay.innerText = "智联详情队列已唤醒";
+                    setTimeout(() => {
+                        browser.runtime.sendMessage({ action: "closeCurrentTab" }).catch(() => {
+                            window.close();
+                        });
+                    }, 1200);
+                } else {
+                    overlay.style.background = "#9a3412";
+                    overlay.innerText = `详情队列唤醒失败：${response?.error || "未知错误"}`;
+                }
+            } catch (e) {
+                overlay.style.background = "#9a3412";
+                overlay.innerText = `详情队列唤醒失败：${e instanceof Error ? e.message : String(e)}`;
+            }
+        }, 800);
+    }
+
+    if (isListQueueWakeMode() && isZhilianPage) {
+        const overlay = document.createElement('div');
+        overlay.style.cssText = 'position:fixed;top:10px;right:10px;background:#2563eb;color:white;padding:20px;z-index:999999;font-weight:bold;border-radius:10px;box-shadow:0 0 20px rgba(0,0,0,0.5);white-space:pre-line;';
+        overlay.innerText = `智联列表队列唤醒 (${harvesterVersion})...`;
+        document.body.appendChild(overlay);
+
+        setTimeout(async () => {
+            try {
+                const response = await browser.runtime.sendMessage({ action: "runListTaskQueue" }) as any;
+                if (response?.success) {
+                    overlay.style.background = "green";
+                    overlay.innerText = "智联列表队列已唤醒";
+                    setTimeout(() => {
+                        browser.runtime.sendMessage({ action: "closeCurrentTab" }).catch(() => {
+                            window.close();
+                        });
+                    }, 1200);
+                } else {
+                    overlay.style.background = "#9a3412";
+                    overlay.innerText = `列表队列唤醒失败：${response?.error || "未知错误"}`;
+                }
+            } catch (e) {
+                overlay.style.background = "#9a3412";
+                overlay.innerText = `列表队列唤醒失败：${e instanceof Error ? e.message : String(e)}`;
+            }
+        }, 800);
     }
 
     if (isDirectJobDetailMode() && isZhilianPage) {

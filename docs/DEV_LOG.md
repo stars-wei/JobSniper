@@ -11,6 +11,406 @@
 
 ## 日志时间线
 
+## [2026-05-07] - 列表页采集接入队列与自动归档 (Codex)
+
+### 会话纪要
+岗位列表页（job list）原逻辑依赖 MCP 打开浏览器前台并由 content script 在当前标签页执行采集，采集产物下载后需要手工调用归档工具。为与岗位详情页（job detail）保持一致，本次将 job list 采集改为“入队 → 扩展后台处理 → 监视脚本完成判定 → 自动归档”的流水线。
+
+### 主要变更
+- Joblens 扩展新增 job list 队列：
+  - 任务文件：`D:\\Downloads\\zhilian_list_tasks.jsonl`
+  - 结果文件：`D:\\Downloads\\zhilian_list_results.jsonl`
+  - background 警报轮询：`listQueuePoll`（与 detail 同为 5s 周期）
+- content script 在 `clipper_list_queue=1` 时：
+  - 采集完成后发送 `zhilianListHarvestDone` 到 background
+  - 自动关闭标签页（不再提示“请手动关闭”）
+- 新增通用队列解析脚本：`programs/JobSniper/scripts/parse_queue_results.py`
+- 新增 job list 监视脚本：`/home/xstars/.local/bin/watch_job_list.sh`，完成判定后调用 `archive_outputs.py` 自动归档
+- MCP `launch_zhilian_job_list_collection()` 改为写入队列并启动监视脚本；新增可选 `wake_browser`，用于打开 `clipper_list_queue_wake=1` 唤醒页触发一次队列执行
+
+### 验证
+- `npm run build:chrome`：通过。
+- `bash -n /home/xstars/.local/bin/watch_job_list.sh`：通过。
+- `PYTHONDONTWRITEBYTECODE=1 python3 -m py_compile mcp_server.py scripts/parse_queue_results.py`：通过。
+
+### 署名
+**Codex**
+*Timestamp: 2026-05-07 19:20 (Asia/Shanghai)*
+
+---
+
+## [2026-05-07] - 收敛详情监视脚本完成判定入口 (Codex)
+
+### 会话纪要
+讨论详情采集监视脚本时确认，`completed = done + failed` 引入后，`completed >= total` 应作为唯一完成判定入口。原脚本仍保留 `done >= total` 分支，虽然业务上无副作用，但会造成两个完成入口并降低状态机可读性。
+
+### 主要变更
+- 删除 `watch_downloads.sh` 中冗余的 `done >= total` 归档分支。
+- 将全部成功路径显式归入 `completed >= total` 分支的 `failed == 0` 分支。
+- 保留失败重试、部分成功归档、全部失败通知三类结果处理逻辑。
+
+### 验证
+- `bash -n /home/xstars/.local/bin/watch_downloads.sh`：通过。
+
+### 署名
+**Codex**
+*Timestamp: 2026-05-07 01:02 (Asia/Shanghai)*
+
+---
+
+## [2026-05-07] - 分离归档 JSON 与 stderr 输出 (Codex)
+
+### 会话纪要
+检查监视脚本归档阶段时发现，`archive_outputs.py` 的 stdout 与 stderr 被 `2>&1` 合并写入 `archive_result.json`。如果归档脚本产生 warning、traceback 或其他 stderr 内容，后续 `json.load()` 会读取到被污染的 JSON 文件。
+
+### 主要变更
+- `watch_downloads.sh` 新增 `ARCHIVE_JSON` 与 `ARCHIVE_ERR`。
+- 归档 stdout 单独写入 `archive_result.json`。
+- 归档 stderr 单独写入 `archive_result.err`，并逐行写入监视日志 `ARCHIVE_ERR`。
+- 记录归档命令非零退出码。
+- `json.load()` 解析错误单独写入 `archive_parse.err`，并记录为 `ARCHIVE_PARSE_ERR`。
+
+### 验证
+- `bash -n /home/xstars/.local/bin/watch_downloads.sh`：通过。
+- `git diff --check`：通过。
+
+### 署名
+**Codex**
+*Timestamp: 2026-05-07 00:55 (Asia/Shanghai)*
+
+---
+
+## [2026-05-07] - 补齐详情监视脚本 failed 策略 (Codex)
+
+### 会话纪要
+验证码/安全验证页现在会写入 `status=failed`。原监视脚本主要以 `done==total` 作为完成条件，存在 failed 任务时可能卡住。因此补齐 failed 批次的重试、归档和通知策略。
+
+### 主要变更
+- `watch_downloads.sh` 使用 `done + failed` 判断任务是否已有结果。
+- 有 failed 且未达到 `MAX_TASK_RETRIES` 时，自动将失败任务追加回队列重试。
+- 重试后仍有 failed：
+  - 如果存在 done 结果，则归档已成功下载的详情，并进入通知。
+  - 如果全部 failed，则不归档，直接进入通知。
+- 通知文案改为显示 `done/failed/total`。
+- `parse_results.py` 改为按 `job_id` 或标准化 URL 归并任务和结果，避免重试追加队列行导致 total 虚增。
+
+### 验证
+- `bash -n /home/xstars/.local/bin/watch_downloads.sh`：通过。
+- `python3 -m py_compile /tmp/watch_downloads/parse_results.py`：通过。
+- 模拟同一岗位先 `failed` 后 `done`：解析结果为 `total=1 done=1 failed=0`。
+- `git diff --check`：通过。
+
+### 署名
+**Codex**
+*Timestamp: 2026-05-07 00:50 (Asia/Shanghai)*
+
+---
+
+## [2026-05-07] - 修复验证码路径误写 done 风险 (Codex)
+
+### 会话纪要
+检查详情队列验证码路径时发现风险：`captchaDetected` 会调用 `resolveCaptcha()` 立即 resolve，但 `processSingleDetailUrl()` 只按 timeout 判断失败。验证码路径因此可能返回 `success=true`，导致 `zhilian_detail_results.jsonl` 写入 `done`，即使详情 Markdown 并不存在。
+
+### 主要变更
+- 将 `captchaResolvers` 从无参 resolver 改为携带 `DetailProcessResult`。
+- `captchaDetected` 触发时返回 `{ success: false, reason: "captcha detected" }`。
+- `processSingleDetailUrl()` 优先返回 resolver 携带的结果，不再把验证码 resolve 误判为成功。
+- 队列结果因此会写入 `status="failed"`，并记录 `error="captcha detected"`。
+
+### 验证
+- `npm run build:chrome`：通过，已更新 `dist/background.js` 和 Chrome zip 构建产物。
+- `rg "DetailProcessResult|captcha detected|resolvedResult"`：确认源码和构建产物包含失败结果路径。
+- `git diff --check`：通过。
+
+### 后续事项
+- 监视脚本仍需明确 failed 批次策略：失败重试后仍失败时，应进入通知而不是等待 `done==total`。
+
+### 署名
+**Codex**
+*Timestamp: 2026-05-07 00:40 (Asia/Shanghai)*
+
+---
+
+## [2026-05-07] - 检测智联 EdgeOne 安全验证页 (Codex)
+
+### 会话纪要
+详情采集默认纯队列模式测试中，`CC159297110J40882172201` 被智联/Tencent Cloud EdgeOne 安全验证页拦截。扩展将验证页通过 DOM fallback 误判为 `success`，生成并归档了 `未知公司_www.zhaopin.com.md`。
+
+### 主要变更
+- 在 `parseZhilianDetailPage()` 开头前置调用 `isCaptchaPage()`。
+- 命中验证页时直接返回 `status="failed"` 和 `error="security verification page detected"`。
+- 扩充 `isCaptchaPage()` 检测特征：
+  - `正在验证连接安全性`
+  - `请勾选下方复选框`
+  - `验证完成后.*重定向`
+  - `Tencent Cloud EdgeOne`
+  - `Protected by Tencent Cloud EdgeOne`
+
+### 验证
+- `npm run build:chrome`：通过，已更新 `dist/content.js` 和 Chrome zip 构建产物。
+- `rg "security verification page detected|Tencent Cloud EdgeOne|正在验证连接安全性"`：确认源码和构建产物包含安全验证检测。
+- `git diff --check`：通过。
+
+### 后续事项
+- 需要重载 Chrome 扩展后复测安全验证页。
+- 当前监视脚本主要按 `done==total` 触发归档；如果安全验证任务写入 `failed`，还需要明确 failed 批次的通知/重试策略，避免卡住。
+
+### 署名
+**Codex**
+*Timestamp: 2026-05-07 00:30 (Asia/Shanghai)*
+
+---
+
+## [2026-05-07] - 详情采集默认改为纯队列后台模式 (Codex)
+
+### 会话纪要
+批量采集回归后发现两个体验问题：MCP 详情采集入口每次打开 `clipper_detail_queue=1` 唤醒页会导致 Chrome 切到前台；同时每次采集都先打开智联首页，而扩展后台本身已经能通过 alarm 轮询 `zhilian_detail_tasks.jsonl` 并访问正确详情 URL。
+
+### 主要变更
+- `launch_zhilian_job_detail_collection()` 默认只写入 `zhilian_detail_tasks.jsonl`，不再打开智联首页或唤醒页。
+- 新增可选参数 `wake_browser: bool = False`。
+- 只有显式传入 `wake_browser=True` 时，才打开 `https://www.zhaopin.com/?clipper_detail_queue=1` 作为人工/应急唤醒入口。
+- 返回值保留 `wake_url`、`chrome_launched`、`wake_debounced`，默认分别为 `null`、`false`、`false`。
+
+### 验证
+- 本地 smoke test：默认调用 `Popen` 次数为 0。
+- 本地 smoke test：显式 `wake_browser=True` 时 `Popen` 次数增加为 1。
+- `bash -n /home/xstars/.local/bin/watch_downloads.sh`：通过。
+
+### 结论
+详情采集默认回归“后台模式”：MCP 只负责入队，Chrome 扩展后台轮询队列并采集详情页。这样避免浏览器切前台，也避免每个任务先打开智联首页。
+
+### 署名
+**Codex**
+*Timestamp: 2026-05-07 00:20 (Asia/Shanghai)*
+
+---
+
+## [2026-05-07] - 修复详情批量队列竞态与监视状态机 (Codex)
+
+### 会话纪要
+针对 5 条详情批量采集测试暴露的问题，本次修复两个批量闭环缺口：连续唤醒导致首条任务重复采集，以及监视脚本停留在旧 `notifying` 阶段时无法处理新批次。
+
+### 主要变更
+
+#### 1. 扩展侧 in-flight 锁
+- `background.ts` 新增 `jobsniper_detail_inflight_locks_v1` 与 `jobsniper_detail_done_locks_v1`。
+- 队列执行前按 `job_id` 或标准化 URL 生成锁键。
+- 同一扩展后台实例内先用内存 `detailRuntimeClaims` 同步占位，再写入 `chrome.storage.local`。
+- 任务开始前写入 in-flight 锁，成功后写入 done 锁，失败后释放 in-flight 锁。
+- in-flight 锁设置 10 分钟 TTL，避免异常中断后永久阻塞任务。
+
+#### 2. MCP 唤醒去抖
+- `launch_zhilian_job_detail_collection()` 增加 10 秒唤醒去抖。
+- 连续批量入队时只让第一条任务打开 `clipper_detail_queue=1` 唤醒页，后续短时间调用只入队并返回 `wake_debounced=true`。
+
+#### 3. 监视脚本新批次识别
+- `watch_downloads.sh` 为 `zhilian_detail_tasks.jsonl` 计算 `cksum` 签名。
+- 检测到任务文件签名变化且 `total>0` 时，重置 `phase`、`done_prev`、`retry_count` 和 `notify_attempt`。
+- 解决旧 `notifying` 状态下新任务完成后无法进入归档阶段的问题。
+
+### 验证
+- `compile(mcp_server.py)`：通过。
+- `bash -n /home/xstars/.local/bin/watch_downloads.sh`：通过。
+- `npm run build:chrome`：通过，已更新 Chrome 扩展构建产物。
+- `rg "jobsniper_detail_done_locks_v1|jobsniper_detail_inflight_locks_v1|wake_debounced|NEW BATCH"`：确认源码/构建产物包含新逻辑。
+- `git diff --check`：通过。
+
+### 后续验证
+- 已在重启 JobSniper MCP Server 并刷新 Chrome 扩展后执行 5 条批量回归。
+- 任务文件签名变化被正确识别，监视脚本多次记录 `NEW BATCH` 并重置状态。
+- 采集结果为 `done=5/5`，归档日志显示 `ARCHIVE: moved=5 → notifying`，通知确认后清理任务/结果文件。
+- 5 个岗位详情已归档到“人工智能讲师”职业目录。
+- MCP 唤醒去抖在批量调用中部分生效；实际防重复主要由扩展侧 runtime/in-flight/done 锁完成，未再出现重复详情文件。
+
+### 署名
+**Codex**
+*Timestamp: 2026-05-07 00:05 (Asia/Shanghai)*
+
+---
+
+## [2026-05-06] - 详情队列五条批量采集测试 (Codex)
+
+### 会话纪要
+按系统业务流测试 5 条“人工智能讲师”岗位详情批量采集。MCP 详情入口连续入队 5 条任务，Chrome 扩展后台成功消费队列并写入 `zhilian_detail_results.jsonl`，但批量场景暴露出重复采集竞态和监视脚本状态未重置问题。
+
+### 测试对象
+- 毕马科技 - AI工程师（含后端）
+- 上海自仪院智能化系统有限公司 - 研发工程师
+- 新东方教育科技集团有限公司 - 上海-智慧空间逻辑思维教师(J55835)
+- 沈阳为来教育科技有限公司 - 管培生（讲师方向）
+- 方家铺子 - AI工程师 - 龙虾训练 & AI应用【base莆田】
+
+### 测试结果
+- `zhilian_detail_tasks.jsonl`：5 行。
+- `zhilian_detail_results.jsonl`：6 行。
+- 5 个目标岗位均出现 `status=done`。
+- 未再生成 `zhilian_detail_results.txt`。
+- Downloads 中生成 6 个详情 Markdown，其中“毕马科技”重复生成 2 次。
+
+### 问题记录
+
+#### 1. 批量唤醒存在并发竞态
+- 连续 5 次 MCP 调用都会打开 `clipper_detail_queue=1` 唤醒页。
+- 第 1 条任务在结果文件落盘前被另一轮队列再次处理，导致 `task_index=0` 出现两条 done 记录。
+- 后续修复方向：支持批量入队后只唤醒一次，或在扩展侧增加更强的 in-flight URL/job_id 锁。
+
+#### 2. 监视脚本 stale notifying 状态未重置
+- 上一轮单条测试后监视脚本仍处于 `phase=notifying`。
+- 新的 5 条任务完成后状态显示 `total=5 done=5 failed=0 phase=notifying`，但未进入新一轮归档。
+- 后续修复方向：监视脚本检测到新任务文件或新结果批次时，应从 stale `notifying` 状态重置为 crawling/archiving。
+
+### 结论
+MCP 入队、Chrome 唤醒、扩展后台批量采集和 JSONL 结果写入已经可用；批量业务闭环还需修复唤醒并发和监视脚本状态机。
+
+### 署名
+**Codex**
+*Timestamp: 2026-05-06 23:58 (Asia/Shanghai)*
+
+---
+
+## [2026-05-06] - 修正详情结果 JSONL 下载 MIME (Codex)
+
+### 会话纪要
+后台详情队列已能消费 `zhilian_detail_tasks.jsonl`，但 Chrome 实际生成的结果文件为 `zhilian_detail_results.txt`，而监视脚本和源码约定为 `zhilian_detail_results.jsonl`。这会导致监视脚本无法读取完成状态。
+
+### 主要变更
+- 保持结果文件名常量为 `zhilian_detail_results.jsonl`。
+- 将结果下载的 data URL MIME 从 `text/plain;charset=utf-8` 改为 `application/x-ndjson;charset=utf-8`，与 JSONL/NDJSON 文本行格式匹配，避免 Chrome 将文件落为 `.txt`。
+
+### 验证
+- `npm run build:chrome`：通过，已更新 `dist/background.js` 和 Chrome zip 构建产物。
+- `rg "application/x-ndjson|zhilian_detail_results\\.jsonl" integrations/joblens/src/background.ts integrations/joblens/dist/background.js`：确认源码和构建产物包含新 MIME 与 `.jsonl` 文件名。
+- `git diff --check`：通过。
+
+### 署名
+**Codex**
+*Timestamp: 2026-05-06 23:48 (Asia/Shanghai)*
+
+---
+
+## [2026-05-06] - 打通详情队列唤醒入口 (Codex)
+
+### 会话纪要
+按系统业务流测试详情采集时，MCP 工具能写入 `D:\Downloads\zhilian_detail_tasks.jsonl`，但 Chrome 扩展后台没有消费队列，`zhilian_detail_results.jsonl` 和详情 Markdown 均未生成。检查确认详情采集入口缺少 Chrome 唤醒动作，扩展队列也依赖旧的行号 checkpoint。
+
+### 主要变更
+
+#### 1. MCP 详情入口唤醒 Chrome
+- `launch_zhilian_job_detail_collection()` 写入任务后打开 `https://www.zhaopin.com/?clipper_detail_queue=1`。
+- 工具响应增加 `wake_url`、`chrome_launched` 和 `chrome_error`，便于 MCP 客户端判断是否完成唤醒动作。
+
+#### 2. 扩展后台显式队列入口
+- `background.ts` 新增 `runDetailTaskQueue` runtime message 入口。
+- `content.ts` 识别 `clipper_detail_queue=1` 唤醒页，向后台发送队列执行消息。
+
+#### 3. 去除行号 checkpoint 依赖
+- 详情队列不再用 `chrome.storage.local.detailCheckpoint` 过滤任务。
+- 改为读取 `zhilian_detail_results.jsonl`，按标准化 URL 和 `job_id` 判断已完成任务，避免重写任务文件后被旧行号跳过。
+
+### 验证
+- `python3 -m py_compile mcp_server.py`：通过。
+- `npm run build:chrome`：通过，已更新 `dist/background.js`、`dist/content.js` 和 Chrome zip 构建产物。
+- 本地函数级 smoke test：新版 `launch_zhilian_job_detail_collection()` 返回 `wake_url`、`chrome_launched` 和 `chrome_error`。
+- MCP 客户端调用仍返回旧格式，说明当前运行的 MCP Server 进程尚未重载新代码；端到端闭环需重启 MCP Server 和刷新 Chrome 扩展后验证。
+
+### 署名
+**Codex**
+*Timestamp: 2026-05-06 23:38 (Asia/Shanghai)*
+
+---
+
+## [2026-05-06] - 修复详情队列结果文件插值错误 (Codex)
+
+### 会话纪要
+采集详情任务后，`D:\Downloads\zhilian_detail_results.json` 内容出现字面量 `${encodeURIComponent(...)}`，说明 TypeScript 模板字符串没有执行插值。检查确认 `readResults()` 和 `writeResult()` 中存在错误的 `\${...}` 转义。
+
+### 主要变更
+
+#### 1. 模板字符串修复
+- 将 `file:///D:/Downloads/\${DETAIL_RESULTS_FILE}` 修正为 `file:///D:/Downloads/${DETAIL_RESULTS_FILE}`。
+- 将 `data:application/json;charset=utf-8,\${encodeURIComponent(...)}` 修正为正常插值。
+
+#### 2. JSONL 输出格式
+- 保持结果文件名常量为 `zhilian_detail_results.jsonl`。
+- 将结果文件 MIME 改为 `text/plain;charset=utf-8`，以符合 JSONL 文本行格式。
+- 写入前显式生成 `content`，内容为一行一个 JSON 对象。
+
+#### 3. 构建产物
+- 重新构建 Chrome 扩展，更新 `dist/background.js` 和 `builds/joblens-1.10.0-chrome.zip`。
+
+### 验证
+- `rg "\\\$\{|data:application/json|zhilian_detail_results\.json\b" integrations/joblens/src/background.ts`：确认错误插值和旧 MIME 不再存在。
+- `npm run build:chrome`：通过。
+- 构建产物中包含 `zhilian_detail_results.jsonl` 与 `data:text/plain;charset=utf-8`。
+
+### 署名
+**Codex**
+*Timestamp: 2026-05-06 02:20 (Asia/Shanghai)*
+
+---
+
+## [2026-05-05] - 修复智联详情队列重复采集 (Codex)
+
+### 会话纪要
+扫描 `D:\Downloads` 后发现 `ZHILIAN_DETAIL_*.md` 在 2026-05-05 22:39-22:58 间大量重复生成。检查确认 `zhilian_detail_tasks.jsonl` 只有 5 条任务，但扩展后台仍反复处理同一批详情 URL。
+
+### 主要变更
+
+#### 1. 问题定位
+- 详情任务文件：`D:\Downloads\zhilian_detail_tasks.jsonl`。
+- 任务完成记录期望文件：`zhilian_detail_results.jsonl`。
+- 实际目录中只有 `zhilian_detail_results.txt`，没有 `zhilian_detail_results.jsonl`，导致后台轮询无法可靠识别已完成任务。
+
+#### 2. 队列去重修复
+- 在 Joblens Chrome 扩展后台增加 `browser.storage.local` 已完成 URL 记录。
+- `results.jsonl` 继续作为可读审计产物，但不再作为唯一去重依据。
+- 详情队列按 URL 跳过已完成任务，避免任务文件残留时重复采集。
+
+#### 3. 构建产物
+- 重新构建 Chrome 扩展，更新 `dist/background.js` 和 `builds/joblens-1.10.0-chrome.zip`。
+
+### 验证
+- `npm run build:chrome`：通过。
+- `rg "jobsniper_detail_done_task_urls_v1" dist/background.js`：确认构建产物包含存储去重逻辑。
+
+### 署名
+**Codex**
+*Timestamp: 2026-05-05 23:05 (Asia/Shanghai)*
+
+---
+
+## [2026-05-05] - 生成职业级岗位画像文件 (Codex)
+
+### 会话纪要
+根据讨论结果，本次没有把岗位职责/岗位要求总结正文写入 `_岗位索引表_*.md`，而是在每个职业目录下单独生成 `_岗位画像_{职业}.md`。岗位索引表只保留一行跳转链接，继续承担岗位列表导航职责。
+
+### 主要变更
+
+#### 1. 新增职业画像文件
+- `产品/互联网产品经理/AI产品经理/_岗位画像_AI产品经理.md`
+- `教育培训/IT培训/人工智能讲师/_岗位画像_人工智能讲师.md`
+- `教育培训/IT培训/编程教师/_岗位画像_编程教师.md`
+- `教育培训/教务管理/课程设计/_岗位画像_课程设计.md`
+
+#### 2. 统计口径
+- 只统计具体岗位详情 Markdown 中的 JD 正文。
+- 排除岗位索引表、frontmatter、标题、公司介绍和工商信息。
+- 每条职责/要求后使用 `覆盖率：xx%（n/N）` 表示命中该语义主题的 JD 数与有效岗位详情样本数。
+
+#### 3. 索引表链接
+- 在 4 个 `_岗位索引表_*.md` 开头加入对应 `_岗位画像_*.md` 链接。
+
+### 验证
+- `find ... -name '_岗位画像_*.md'`：确认 4 份画像文件已生成。
+- `rg -n "职业画像：见|覆盖率：" ...`：确认索引链接与覆盖率格式存在。
+
+### 署名
+**Codex**
+*Timestamp: 2026-05-05 13:20 (Asia/Shanghai)*
+
+---
+
 ## [2026-05-04] - 删除 trigger_clipper 占位工具 (Codex)
 
 ### 会话纪要
