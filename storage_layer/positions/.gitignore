@@ -1,0 +1,7 @@
+*
+!.gitignore
+!boss_intelligence_vault/
+!boss_intelligence_vault/.gitignore
+!zhilian_intelligence_vault/
+!zhilian_intelligence_vault/.gitignore
+!zhilian_master_tasks.json

@@ -1,2 +1,7 @@
 venv/
 .env
+__pycache__/
+*.Zone.Identifier
+*.log
+.claude/settings.local.json
+docs/DEV_LOG.md

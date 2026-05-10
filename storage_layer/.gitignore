@@ -1,2 +1,11 @@
 *
-!/.gitignore
+!.gitignore
+!personas/
+!personas/.gitignore
+!positions/
+!positions/.gitignore
+!positions/boss_intelligence_vault/
+!positions/boss_intelligence_vault/.gitignore
+!positions/zhilian_intelligence_vault/
+!positions/zhilian_intelligence_vault/.gitignore
+!positions/zhilian_master_tasks.json

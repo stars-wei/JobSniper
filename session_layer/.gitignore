@@ -1,2 +1,6 @@
 *
-!/.gitignore
+!.gitignore
+!meeting/
+!meeting/.gitignore
+!resume/
+!resume/.gitignore
