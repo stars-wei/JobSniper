@@ -1,117 +1,137 @@
 # JobSniper
 
-JobSniper is a local MCP service prototype for job-search intelligence and candidate profiling.
+JobSniper 是一个面向本地求职情报工作的 MCP Server。它把招聘平台采集、岗位知识库、用户画像和会话产物组织在同一个本地工作区里，让 Codex、Claude Desktop 等 MCP Client 可以通过统一工具读取资料、启动采集、归档岗位数据和更新画像。
 
-It sits beside the Zhilian intelligence sandbox and is intended to expose collected recruitment data, user persona data, and later collection commands to an Agent through MCP resources and tools.
+当前重点支持智联招聘（Zhilian）的招聘情报工作流：平台岗位菜单发现、职业关键词岗位列表采集、单岗位详情页采集、Downloads 产物归档、岗位详情检索和用户画像维护。
 
-## Current Status
+## 能力边界
 
-This project is currently a lightweight skeleton, not a complete product.
+已实现：
 
-Implemented:
+- FastMCP stdio 服务入口：`mcp_server.py`
+- MCP Resource：读取当前用户画像
+- MCP Resource：按自然嵌套路径读取岗位详情 Markdown
+- MCP Tool：搜索岗位详情文件
+- MCP Tool：采集智联 job menu（行业-职能-职业三级结构）
+- MCP Tool：采集智联 job list（某个职业关键词下的岗位列表）
+- MCP Tool：采集智联 job detail（某个具体岗位详情页）
+- MCP Tool：归档 `D:\Downloads` 中的 Joblens 采集产物
+- MCP Tool：更新用户画像技能置信度
+- Joblens Chrome 扩展集成：`integrations/joblens`
+- 队列式后台采集：`zhilian_detail_tasks.jsonl` / `zhilian_list_tasks.jsonl`
+- 监视脚本：根据 results JSONL 判断完成、失败、重试和归档
 
-- MCP server entrypoint: `mcp_server.py`
-- Current user persona storage: `storage_layer/personas/current_user.json`
-- Knowledge vault directory layout for layered recruitment intelligence
-- Embedded Joblens integration copy: `integrations/joblens`
-- MCP resource for reading the current persona
-- MCP resource for reading job detail Markdown files by nested path
-- MCP tool for searching job detail files
-- MCP tool for launching Zhilian collection through the embedded Joblens Chrome extension
-- MCP tool for archiving Joblens outputs from `D:\Downloads` into the knowledge vault
-- MCP tool for updating persona skill confidence scores
+仍在演进：
 
-Not implemented yet:
+- BOSS 直聘采集入口
+- 多平台统一采集抽象
+- 更完整的推荐报告和简历生成流水线
+- Windows/WSL 权限差异下的归档移动策略
 
-- Real collection scripts under `collection_layer`
-- Session orchestration under `session_layer`
-- Full recommendation or consulting workflow
-- Stable protocol-level stdio MCP smoke test; the default smoke test currently covers function-level behavior
-
-## Directory Layout
+## 目录结构
 
 ```text
 JobSniper/
-  mcp_server.py
-  collection_layer/
-    scripts/
+  mcp_server.py                       # FastMCP server
+  requirements.txt                    # Python dependency pin
+  scripts/
+    archive_outputs.py                # Standalone archive helper
+    parse_queue_results.py            # Queue task/results parser
+    smoke_mcp_server.py               # Import + stdio smoke tests
   integrations/
-    joblens/
+    joblens/                          # Chrome extension integration
+      src/
       dist/
-        manifest.json
-  session_layer/
+      package.json
+  docs/
+    CODING_GUIDELINES.md              # Storage and naming rules
+    DEV_LOG.md
   storage_layer/
     personas/
-      current_user.json
+      current_user.json               # Current candidate persona
     positions/
-      boss_intelligence_vault/
-      zhilian_intelligence_vault/
+      zhilian_master_tasks.json       # Keyword -> industry/domain mapping
+      zhilian_intelligence_vault/     # Zhilian job intelligence vault
+      boss_intelligence_vault/        # Reserved for BOSS
+  session_layer/                      # Reports, resumes, meeting notes
 ```
 
-### `collection_layer`
+## 数据模型
 
-Reserved for collection commands and adapters.
-
-Zhilian collection is split into job menu, job list, and job detail tools; archive handling is done by `archive_joblens_outputs`.
-
-### `integrations/joblens`
-
-Lightweight copy of the upstream Joblens project used by JobSniper.
-
-The upstream source at `/home/xstars/programs/joblens` is treated as read-only for this integration. JobSniper loads the Chrome extension artifact from:
+`storage_layer/positions` 按平台分库，每个平台库采用自然嵌套结构：
 
 ```text
-integrations/joblens/dist
+storage_layer/positions/
+  zhilian_intelligence_vault/
+    _行业索引表_智联招聘.md
+    教育培训/
+      _职能索引表_教育培训.md
+      IT培训/
+        _职业索引表_IT培训.md
+        人工智能讲师/
+          _岗位索引表_人工智能讲师.md
+          上海某公司_人工智能讲师.md
 ```
 
-The copy intentionally excludes `node_modules` but keeps source, docs, scripts, `dist`, `builds`, and configuration files.
+核心概念：
 
-### `session_layer`
+- **平台索引表**：平台知识库内部的导航入口，例如 `_行业索引表_智联招聘.md`。
+- **职业岗位索引表**：某个职业关键词下的岗位列表归档，例如 `_岗位索引表_人工智能讲师.md`。
+- **岗位详情页**：最终叶子文件，命名为 `{公司名称}_{岗位名称}.md`。
+- **关键词发现产物**：平台 job menu 发现结果，命名为 `{platform}_keyword_discovery_{timestamp}.md`，存放在 `storage_layer/positions/` 根目录；它不是平台索引表。
 
-Reserved for user interaction sessions, audit traces, and recommendation workflows.
+详细命名规则见 [docs/CODING_GUIDELINES.md](docs/CODING_GUIDELINES.md)。
 
-### `storage_layer/personas`
+## MCP 接入
 
-Stores candidate profile data.
+安装 Python 依赖：
 
-The current persona file is:
-
-```text
-storage_layer/personas/current_user.json
+```bash
+cd /home/xstars/programs/JobSniper
+python3 -m venv venv
+venv/bin/pip install -r requirements.txt
 ```
 
-It contains:
+MCP Client 配置示例：
 
-- candidate name
-- target roles
-- skill confidence scores
-- audit notes explaining score changes
+```json
+{
+  "mcpServers": {
+    "jobsniper": {
+      "command": "/home/xstars/programs/JobSniper/venv/bin/python",
+      "args": ["/home/xstars/programs/JobSniper/mcp_server.py"],
+      "cwd": "/home/xstars/programs/JobSniper"
+    }
+  }
+}
+```
 
-### `storage_layer/positions` (formerly `knowledge_vault`)
+协议级 smoke test：
 
-Stores recruitment intelligence artifacts organized by platform and a **natural nested (tree-based)** structure.
+```bash
+cd /home/xstars/programs/JobSniper
+venv/bin/python scripts/smoke_mcp_server.py --stdio
+```
 
-Each platform folder (e.g., `zhilian_intelligence_vault`) follows this hierarchy:
-- **Platform Level**: contains `_Platform Index_[Platform Name].md` and Industry folders.
-- **Industry Level**: contains `_Function Index_[Industry Name].md` and Function folders.
-- **Function Level**: contains `_Occupation Index_[Function Name].md` and Occupation folders.
-- **Occupation Level**: contains `_Job Index_[Occupation Name].md` and Job Details files.
-
-Job Detail files follow the naming convention: `{Company Name}_{Job Title}.md`.
+期望结果：客户端可以完成 `initialize`、`list_tools` 和 `list_resources`，并看到 6 个工具、1 个资源。
 
 ## MCP Resources
 
 ### `jobsniper://persona`
 
-Returns the current candidate persona JSON.
+读取当前用户画像：
 
-If `current_user.json` does not exist, the server returns a default empty persona skeleton.
+```text
+storage_layer/personas/current_user.json
+```
+
+如果画像文件不存在，服务返回默认空画像骨架。
 
 ### `jobsniper://vault/positions/{platform}/{path_to_job}`
 
-Returns a job detail Markdown file from the nested storage layer.
+按自然嵌套路径读取岗位详情 Markdown。
 
-Example:
+示例：
 
 ```text
 jobsniper://vault/positions/zhilian/产品/互联网产品经理/AI产品经理/上海倍通医药科技咨询有限公司_AI产品经理.md
@@ -119,175 +139,241 @@ jobsniper://vault/positions/zhilian/产品/互联网产品经理/AI产品经理/
 
 ## MCP Tools
 
-### `find_job_detail(platform: str, keyword: str, company: str | None = null, limit: int = 5)`
+### `find_job_detail`
 
-Searches job detail Markdown files by filename.
+在岗位知识库中按文件名搜索岗位详情。
 
-Parameters:
+参数：
 
-- `platform`: `zhilian` or `boss`
-- `keyword`: job title or filename keyword
-- `company`: optional company-name keyword
-- `limit`: maximum number of matches to return
+- `platform`: `zhilian` 或 `boss`
+- `keyword`: 岗位名或文件名关键词
+- `company`: 可选公司名关键词
+- `limit`: 返回数量上限
 
-The response includes each matching file's absolute path, relative path, and readable resource URI.
+返回匹配文件的绝对路径、相对路径和 MCP Resource URI。
 
-### Collection Interface Types
+### `launch_zhilian_job_menu_collection`
 
-JobSniper collection is split by data layer:
+采集智联平台 job menu，也就是行业-职能-职业三级岗位体系。
 
-- **job menu**: platform job menu, usually an industry-function-occupation tree.
-- **job list**: jobs under one occupation keyword.
-- **job detail**: one concrete job posting detail page.
+行为：
 
-### `launch_zhilian_job_menu_collection(city_id: str = "538", debug: bool = true)`
+- 打开智联首页
+- 附加 `clipper_keyword_discovery=1`
+- 由 Joblens 扩展导出关键词发现 Markdown
 
-Collects the Zhilian platform job menu and extracts the industry-function-occupation tree and keyword pool.
-
-The tool opens:
-
-```text
-https://www.zhaopin.com/?jl={city_id}&clipper_keyword_discovery=1&clipper_debug=1
-```
-
-Output:
+产物命名：
 
 ```text
 zhilian_keyword_discovery_{timestamp}.md
 ```
 
-### `launch_zhilian_job_list_collection(keyword: str, city_id: str = "538", pages: str = "auto", test: bool = false, debug: bool = true, wake_browser: bool = false)`
-
-Collects the Zhilian job list under one occupation keyword via the background queue. It appends a task to `D:\\Downloads\\zhilian_list_tasks.jsonl`, then the Joblens extension processes it in the background and the monitor script archives the output automatically.
-
-The generated URL includes:
-- `clipper_auto=1`
-- `jl={city_id}`
-- `clipper_pages={pages}`
-- `clipper_keyword_b64u={base64url(keyword)}`
-- optional `clipper_test=1` and `clipper_debug=1`
-- `clipper_list_queue=1` (queue mode)
-
-If `wake_browser=true`, it also opens a lightweight wake page (`clipper_list_queue_wake=1`) to trigger a queue run immediately.
-
-### `launch_zhilian_job_detail_collection(job_url: str, keyword: str = "", debug: bool = true)`
-
-Collects one Zhilian job detail page. The tool opens the given job URL and appends:
-
-- `clipper_job_detail=1`
-- optional `clipper_keyword={keyword}`
-- optional `clipper_debug=1`
-
-Outputs include one job detail Markdown file, raw detail HTML, and a detail manifest. After archive, the Markdown becomes the final job-detail leaf:
+归档位置：
 
 ```text
-{Company Name}_{Job Title}.md
+storage_layer/positions/
 ```
 
-### Concept split
+### `launch_zhilian_job_list_collection`
 
-These two artifacts are intentionally different:
+采集某个职业关键词下的岗位列表。
 
-- **Keyword discovery artifact**: `zhilian_keyword_discovery_{timestamp}.md`
-  - Produced from the Zhilian keyword discovery page.
-  - Captures platform-level categories, keyword groups, and discovery time.
-  - Stored at the root of `storage_layer/positions/`.
-- **Platform index table**: `_行业索引表_智联招聘.md`
-  - Stored inside `storage_layer/positions/zhilian_intelligence_vault/`.
-  - Serves as the internal navigation table that connects industry, function, occupation, and job detail files.
-  - It is not the direct output of the keyword discovery tool.
+行为：
 
-In short:
+- 写入 `D:\Downloads\zhilian_list_tasks.jsonl`
+- Joblens 扩展后台轮询队列
+- 完成后写入 `D:\Downloads\zhilian_list_results.jsonl`
+- 监视脚本根据结果自动归档
 
-- The discovery artifact answers "what keywords and groups exist on Zhilian".
-- The platform index table answers "how those groups are organized inside the vault".
+关键参数：
 
-### `archive_joblens_outputs(keyword: str, since_minutes: int = 60, dry_run: bool = false, include_test: bool = false)`
+- `keyword`: 职业关键词，例如 `人工智能讲师`
+- `city_id`: 智联城市 ID，默认 `538`
+- `pages`: 页数，默认 `auto`
+- `test`: 测试模式
+- `debug`: 调试参数
+- `wake_browser`: 是否打开轻量唤醒页触发后台队列
 
-Scans `D:\Downloads` through `/mnt/d/Downloads` for recent `ZHILIAN_*` files and moves matching outputs into the JobSniper storage layer.
+### `launch_zhilian_job_detail_collection`
 
-The tool resolves the nested path using industry and function mappings from the master task list.
+采集某个具体岗位详情页。
 
-Routing convention (Internal):
-- `zhilian_keyword_discovery_*.md` -> `storage_layer/positions/` root as platform-level discovery artifact.
-- `_行业索引表_智联招聘.md` -> `storage_layer/positions/zhilian_intelligence_vault/` root as the platform index table.
-- `ZHILIAN_<keyword>_*.md` -> Occupation folder as Job Index (`_Job Index_[Occupation Name].md`).
-- `ZHILIAN_RAW_<keyword>_*.json/html` -> `raw/` subdirectory within the Occupation folder.
-- `ZHILIAN_DETAIL_{Company Name}_{Job Title}_{timestamp}.md` -> Final leaf in the tree structure (`{Company Name}_{Job Title}.md`).
-- `ZHILIAN_DETAIL_RAW_*` and `ZHILIAN_DETAIL_MANIFEST_*` -> `raw/` subdirectory within the Occupation folder.
+行为：
 
-Recommended operating flow:
+- 校验 `zhaopin.com` 岗位 URL
+- 写入 `D:\Downloads\zhilian_detail_tasks.jsonl`
+- Joblens 扩展后台打开详情页并采集
+- 写入 `D:\Downloads\zhilian_detail_results.jsonl`
+- 监视脚本根据结果自动归档
 
-1. Launch collection:
+关键参数：
+
+- `job_url`: 智联详情页 URL
+- `keyword`: 所属职业关键词，用于归档定位
+- `save_html`: 是否保留原始 HTML
+- `save_json`: 是否保留 manifest JSON
+- `wake_browser`: 是否打开唤醒页触发后台队列
+
+详情页归档后的最终命名：
+
 ```text
-launch_zhilian_job_list_collection(keyword="AI产品经理", test=true, debug=true)
+{公司名称}_{岗位名称}.md
 ```
 
-2. Wait until Joblens finishes writing downloads.
+### `archive_joblens_outputs`
 
-3. Preview archive moves:
+将 `D:\Downloads` 中的 Joblens 产物归档到 `storage_layer/positions`。
+
+参数：
+
+- `keyword`: 职业关键词
+- `platform`: `zhilian` 或 `boss`
+- `since_minutes`: 只处理最近 N 分钟产物
+- `dry_run`: 只预览归档计划
+- `include_test`: 是否包含 TEST 产物
+
+路由规则：
+
+- `zhilian_keyword_discovery_*.md` -> `storage_layer/positions/`
+- `ZHILIAN_<keyword>_*.md` -> 职业目录下的 `_岗位索引表_{keyword}.md`
+- `ZHILIAN_DETAIL_{公司}_{岗位}_{timestamp}.md` -> 职业目录下的 `{公司}_{岗位}.md`
+- raw / manifest 文件 -> 职业目录下的 `raw/`
+
+注意：MCP 内置归档工具使用移动语义。如果 `/mnt/d/Downloads` 在当前 WSL 会话中是只读挂载，移动会失败；这种情况下应在 Windows 侧执行移动，或使用 `scripts/archive_outputs.py` 的降级复制策略。
+
+### `update_persona`
+
+更新当前用户画像中的技能置信度。
+
+参数：
+
+- `skill_name`
+- `confidence_score`，范围 `0-100`
+- `reasoning`
+
+## 队列文件
+
+智联详情页队列：
+
 ```text
-archive_joblens_outputs(keyword="AI产品经理", dry_run=true)
+D:\Downloads\zhilian_detail_tasks.jsonl
+D:\Downloads\zhilian_detail_results.jsonl
 ```
 
-4. Archive the files:
+智联列表页队列：
+
 ```text
-archive_joblens_outputs(keyword="AI产品经理", dry_run=false)
+D:\Downloads\zhilian_list_tasks.jsonl
+D:\Downloads\zhilian_list_results.jsonl
 ```
 
-### `update_persona(skill_name: str, confidence_score: int, reasoning: str)`
-
-Updates the current persona's skill confidence score.
-
-Example fields written to `current_user.json`:
+results JSONL 的典型记录：
 
 ```json
 {
-  "skills": {
-    "RAG/AI Engineering": {
-      "score": 30,
-      "last_audit_reason": "Built a working RAG demo project."
-    }
-  }
+  "task_index": 1,
+  "url": "https://www.zhaopin.com/jobdetail/....htm?detail=1",
+  "normalized_url": "https://www.zhaopin.com/jobdetail/....htm",
+  "job_id": "...",
+  "keyword": "人工智能讲师",
+  "status": "done",
+  "recorded_at": "2026-05-07T11:32:35.036Z"
 }
 ```
 
-## Run
+## 安全验证处理
 
-Install dependencies:
+Joblens 内容脚本会检测验证码/人机验证/安全验证页。详情采集中一旦出现安全验证：
 
-```bash
-cd /home/xstars/programs/JobSniper
-python -m pip install -r requirements.txt
-```
+- 当前任务写入 `failed`
+- 失败原因包含 `captcha detected`
+- 扩展将详情队列置为暂停
+- 停止继续采集后续任务
+- 浏览器将验证页带到前台，等待人工处理
+- 监视脚本收到 captcha 失败后通知并退出，不自动重试、不归档
 
-From the project directory:
+手动完成验证后，需要重新唤醒详情队列再继续采集。
 
-```bash
-cd /home/xstars/programs/JobSniper
-source venv/bin/activate
-python mcp_server.py
-```
+## Joblens 扩展
 
-The MCP server name is:
+Joblens 是 JobSniper 使用的 Chrome 扩展集成层。源码位于：
 
 ```text
-FastMCP("JobSniper")
+integrations/joblens
 ```
 
-## Verification
+构建 Chrome 扩展：
 
-The default smoke test covers Python import, persona reads, nested job-detail reads, job search, and archive dry-run behavior:
+```bash
+cd /home/xstars/programs/JobSniper/integrations/joblens
+npm install
+npm run build:chrome
+```
+
+构建后需要在 Chrome 扩展管理页重新加载扩展，新的后台队列逻辑才会生效。
+
+## 常用操作
+
+采集 job menu：
+
+```text
+launch_zhilian_job_menu_collection(debug=true)
+```
+
+采集职业关键词列表：
+
+```text
+launch_zhilian_job_list_collection(keyword="人工智能讲师", pages="auto", wake_browser=true)
+```
+
+采集岗位详情：
+
+```text
+launch_zhilian_job_detail_collection(
+  job_url="https://www.zhaopin.com/jobdetail/....htm",
+  keyword="人工智能讲师",
+  wake_browser=true
+)
+```
+
+预览归档：
+
+```text
+archive_joblens_outputs(keyword="人工智能讲师", platform="zhilian", dry_run=true)
+```
+
+执行归档：
+
+```text
+archive_joblens_outputs(keyword="人工智能讲师", platform="zhilian", dry_run=false)
+```
+
+## 开发验证
+
+Python smoke test：
 
 ```bash
 cd /home/xstars/programs/JobSniper
 venv/bin/python scripts/smoke_mcp_server.py
 ```
 
-Protocol-level stdio smoke test entrypoint:
+MCP stdio smoke test：
 
 ```bash
-venv/bin/python scripts/smoke_mcp_server.py --stdio --timeout 8
+cd /home/xstars/programs/JobSniper
+venv/bin/python scripts/smoke_mcp_server.py --stdio
 ```
 
-In the current environment, the protocol-level test passes and verifies `initialize`, `list_tools`, and `list_resources`.
+Joblens build：
+
+```bash
+cd /home/xstars/programs/JobSniper/integrations/joblens
+npm run build:chrome
+```
+
+Git hygiene：
+
+```bash
+git status --short --branch
+git diff --check
+```
