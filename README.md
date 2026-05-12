@@ -17,7 +17,7 @@ JobSniper 是一个面向本地求职情报工作的 MCP Server。它把招聘�
 - MCP Tool：采集智联 job detail（某个具体岗位详情页）
 - MCP Tool：归档 `D:\Downloads` 中的 Joblens 采集产物
 - MCP Tool：更新用户画像技能置信度
-- Joblens Chrome 扩展集成：`integrations/joblens`
+- Joblens Chrome 扩展集成：`scraping_layer/joblens`
 - 队列式后台采集：`zhilian_detail_tasks.jsonl` / `zhilian_list_tasks.jsonl`
 - 监视脚本：根据 results JSONL 判断完成、失败、重试和归档
 
@@ -34,11 +34,11 @@ JobSniper 是一个面向本地求职情报工作的 MCP Server。它把招聘�
 JobSniper/
   mcp_server.py                       # FastMCP server
   requirements.txt                    # Python dependency pin
-  scripts/
-    archive_outputs.py                # Standalone archive helper
-    parse_queue_results.py            # Queue task/results parser
-    smoke_mcp_server.py               # Import + stdio smoke tests
-  integrations/
+  scraping_layer/
+    scripts/
+      archive_outputs.py              # Standalone archive helper
+      parse_queue_results.py          # Queue task/results parser
+      smoke_mcp_server.py             # Import + stdio smoke tests
     joblens/                          # Chrome extension integration
       src/
       dist/
@@ -110,7 +110,7 @@ MCP Client 配置示例：
 
 ```bash
 cd /home/xstars/programs/JobSniper
-venv/bin/python scripts/smoke_mcp_server.py --stdio
+venv/bin/python scraping_layer/scripts/smoke_mcp_server.py --stdio
 ```
 
 期望结果：客户端可以完成 `initialize`、`list_tools` 和 `list_resources`，并看到 6 个工具、1 个资源。
@@ -239,7 +239,7 @@ storage_layer/positions/
 - `ZHILIAN_DETAIL_{公司}_{岗位}_{timestamp}.md` -> 职业目录下的 `{公司}_{岗位}.md`
 - raw / manifest 文件 -> 职业目录下的 `raw/`
 
-注意：MCP 内置归档工具使用移动语义。如果 `/mnt/d/Downloads` 在当前 WSL 会话中是只读挂载，移动会失败；这种情况下应在 Windows 侧执行移动，或使用 `scripts/archive_outputs.py` 的降级复制策略。
+注意：MCP 内置归档工具使用移动语义。如果 `/mnt/d/Downloads` 在当前 WSL 会话中是只读挂载，移动会失败；这种情况下应在 Windows 侧执行移动，或使用 `scraping_layer/scripts/archive_outputs.py` 的降级复制策略。
 
 ### `update_persona`
 
@@ -299,13 +299,13 @@ Joblens 内容脚本会检测验证码/人机验证/安全验证页。详情采�
 Joblens 是 JobSniper 使用的 Chrome 扩展集成层。源码位于：
 
 ```text
-integrations/joblens
+scraping_layer/joblens
 ```
 
 构建 Chrome 扩展：
 
 ```bash
-cd /home/xstars/programs/JobSniper/integrations/joblens
+cd /home/xstars/programs/JobSniper/scraping_layer/joblens
 npm install
 npm run build:chrome
 ```
@@ -354,20 +354,20 @@ Python smoke test：
 
 ```bash
 cd /home/xstars/programs/JobSniper
-venv/bin/python scripts/smoke_mcp_server.py
+venv/bin/python scraping_layer/scripts/smoke_mcp_server.py
 ```
 
 MCP stdio smoke test：
 
 ```bash
 cd /home/xstars/programs/JobSniper
-venv/bin/python scripts/smoke_mcp_server.py --stdio
+venv/bin/python scraping_layer/scripts/smoke_mcp_server.py --stdio
 ```
 
 Joblens build：
 
 ```bash
-cd /home/xstars/programs/JobSniper/integrations/joblens
+cd /home/xstars/programs/JobSniper/scraping_layer/joblens
 npm run build:chrome
 ```
 

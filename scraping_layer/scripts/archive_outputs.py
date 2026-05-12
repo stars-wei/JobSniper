@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Standalone archiver: archive Joblens output from Downloads to vault.
-Usage: python3 scripts/archive_outputs.py <keyword> <platform> [--since-minutes N] [--dry-run] [--include-test]
+Usage: python3 scraping_layer/scripts/archive_outputs.py <keyword> <platform> [--since-minutes N] [--dry-run] [--include-test]
 """
 import filecmp
 import json, os, re, shutil, sys

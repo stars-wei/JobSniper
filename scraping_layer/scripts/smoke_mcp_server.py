@@ -7,7 +7,7 @@ import tempfile
 from pathlib import Path
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
@@ -35,6 +35,8 @@ def run_import_smoke() -> None:
         Path("/mnt/d/Downloads/zhilian_keyword_discovery_20260504_024700.md"),
         "AI产品经理",
         {"industry": "产品", "domain": "互联网产品经理"},
+        mcp_server.VAULT_PATH,  # type: ignore[attr-defined]
+        "zhilian",
     )
     _assert(keyword_discovery_target is not None, "keyword discovery target should resolve")
     _assert(
@@ -50,6 +52,8 @@ def run_import_smoke() -> None:
         Path("/mnt/d/Downloads/ZHILIAN_DETAIL_测试公司_AI产品经理_20260504_031500.md"),
         "AI产品经理",
         {"industry": "产品", "domain": "互联网产品经理"},
+        mcp_server.VAULT_PATH,  # type: ignore[attr-defined]
+        "zhilian",
     )
     _assert(direct_detail_target is not None, "direct detail target should resolve")
     _assert(

@@ -2,7 +2,7 @@
 """Parse Jobsniper queue tasks/results JSONL and print shell assignments.
 
 Usage:
-  python3 scripts/parse_queue_results.py <results.jsonl> <tasks.jsonl>
+  python3 scraping_layer/scripts/parse_queue_results.py <results.jsonl> <tasks.jsonl>
 
 Output (one per line):
   total=<int>
@@ -121,4 +121,3 @@ def main() -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-

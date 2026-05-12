@@ -17,7 +17,7 @@ Implemented:
 - MCP tool for collecting a concrete Zhilian job detail page
 - MCP tool for archiving Joblens outputs from `D:\Downloads`
 - MCP tool for updating persona skill confidence scores
-- Joblens Chrome extension integration: `integrations/joblens`
+- Joblens Chrome extension integration: `scraping_layer/joblens`
 - Background queue collection through `zhilian_detail_tasks.jsonl` and `zhilian_list_tasks.jsonl`
 - Monitor scripts that inspect results JSONL files, detect completion/failure, retry when appropriate, and archive outputs
 
@@ -34,11 +34,11 @@ Still evolving:
 JobSniper/
   mcp_server.py                       # FastMCP server
   requirements.txt                    # Python dependency pin
-  scripts/
-    archive_outputs.py                # Standalone archive helper
-    parse_queue_results.py            # Queue task/results parser
-    smoke_mcp_server.py               # Import + stdio smoke tests
-  integrations/
+  scraping_layer/
+    scripts/
+      archive_outputs.py              # Standalone archive helper
+      parse_queue_results.py          # Queue task/results parser
+      smoke_mcp_server.py             # Import + stdio smoke tests
     joblens/                          # Chrome extension integration
       src/
       dist/
@@ -110,7 +110,7 @@ Protocol-level smoke test:
 
 ```bash
 cd /home/xstars/programs/JobSniper
-venv/bin/python scripts/smoke_mcp_server.py --stdio
+venv/bin/python scraping_layer/scripts/smoke_mcp_server.py --stdio
 ```
 
 Expected result: the client completes `initialize`, `list_tools`, and `list_resources`, and sees 6 tools plus 1 resource.
@@ -239,7 +239,7 @@ Routing rules:
 - `ZHILIAN_DETAIL_{Company}_{Job}_{timestamp}.md` -> `{Company}_{Job}.md` under the occupation directory
 - raw / manifest files -> `raw/` under the occupation directory
 
-Note: the MCP archive tool uses move semantics. If `/mnt/d/Downloads` is mounted read-only in the current WSL session, the move will fail. In that case, run the move from Windows, or use the fallback copy behavior in `scripts/archive_outputs.py`.
+Note: the MCP archive tool uses move semantics. If `/mnt/d/Downloads` is mounted read-only in the current WSL session, the move will fail. In that case, run the move from Windows, or use the fallback copy behavior in `scraping_layer/scripts/archive_outputs.py`.
 
 ### `update_persona`
 
@@ -299,13 +299,13 @@ After manually completing verification, wake the detail queue again to continue 
 Joblens is the Chrome extension integration layer used by JobSniper. Source path:
 
 ```text
-integrations/joblens
+scraping_layer/joblens
 ```
 
 Build the Chrome extension:
 
 ```bash
-cd /home/xstars/programs/JobSniper/integrations/joblens
+cd /home/xstars/programs/JobSniper/scraping_layer/joblens
 npm install
 npm run build:chrome
 ```
@@ -354,20 +354,20 @@ Python smoke test:
 
 ```bash
 cd /home/xstars/programs/JobSniper
-venv/bin/python scripts/smoke_mcp_server.py
+venv/bin/python scraping_layer/scripts/smoke_mcp_server.py
 ```
 
 MCP stdio smoke test:
 
 ```bash
 cd /home/xstars/programs/JobSniper
-venv/bin/python scripts/smoke_mcp_server.py --stdio
+venv/bin/python scraping_layer/scripts/smoke_mcp_server.py --stdio
 ```
 
 Joblens build:
 
 ```bash
-cd /home/xstars/programs/JobSniper/integrations/joblens
+cd /home/xstars/programs/JobSniper/scraping_layer/joblens
 npm run build:chrome
 ```
 
