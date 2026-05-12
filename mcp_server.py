@@ -22,8 +22,7 @@ from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
 mcp = FastMCP("JobSniper")
 
 # 基础路径配置
-BASE_DIR = Path("/home/xstars/programs/JobSniper")
-SANDBOX_DIR = Path("/home/xstars/zhilian_intelligence_sandbox")
+BASE_DIR = Path(__file__).resolve().parent
 STORAGE_PATH = BASE_DIR / "storage_layer"
 PERSONA_PATH = STORAGE_PATH / "personas" / "current_user.json"
 POSITIONS_PATH = STORAGE_PATH / "positions"

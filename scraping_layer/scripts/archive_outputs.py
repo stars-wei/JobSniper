@@ -7,7 +7,7 @@ import json, os, re, shutil, sys
 from datetime import datetime, timedelta
 from pathlib import Path
 
-BASE_DIR = Path("/home/xstars/programs/JobSniper")
+BASE_DIR = Path(__file__).resolve().parents[2]
 DOWNLOADS_PATH = Path("/mnt/d/Downloads")
 STORAGE_PATH = BASE_DIR / "storage_layer"
 POSITIONS_PATH = STORAGE_PATH / "positions"
