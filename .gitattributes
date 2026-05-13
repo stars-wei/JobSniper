@@ -1,0 +1,5 @@
+# Exclude internal development management docs from release source archives.
+docs/PRD.md export-ignore
+docs/DEV_LOG.md export-ignore
+scraping_layer/joblens/docs export-ignore
+scraping_layer/joblens/docs/** export-ignore
