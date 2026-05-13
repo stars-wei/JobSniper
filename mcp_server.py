@@ -42,7 +42,25 @@ LIST_WAKE_LOCK = Path("/tmp/jobsniper_list_queue_wake")
 LIST_WAKE_DEBOUNCE_SECONDS = 10
 
 # ----------------------------------------------------------------
-# 监控脚本管理
+# 通用 helper
+# ----------------------------------------------------------------
+
+def _json_response(payload: dict[str, Any]) -> str:
+    return json.dumps(payload, indent=2, ensure_ascii=False)
+
+
+def _base64url_utf8(value: str) -> str:
+    encoded = base64.urlsafe_b64encode(value.encode("utf-8")).decode("ascii")
+    return encoded.rstrip("=")
+
+
+def _safe_keyword_dir(keyword: str) -> str:
+    cleaned = re.sub(r'[\\/:*?"<>|]+', "_", keyword).strip()
+    return cleaned or "Unknown"
+
+
+# ----------------------------------------------------------------
+# 监控/唤醒 helper
 # ----------------------------------------------------------------
 
 def _start_monitor_if_needed() -> None:
@@ -67,6 +85,7 @@ def _start_monitor_if_needed() -> None:
     except Exception:
         pass
 
+
 def _start_list_monitor_if_needed() -> None:
     """启动岗位列表队列监控脚本（如果未在运行）。"""
     if not LIST_MONITOR_SCRIPT.exists():
@@ -89,6 +108,7 @@ def _start_list_monitor_if_needed() -> None:
     except Exception:
         pass
 
+
 def _launch_detail_queue_wake(wake_url: str) -> tuple[bool, str | None, bool]:
     """Launch Chrome wake URL unless another detail wake happened recently."""
     now = time.time()
@@ -106,6 +126,7 @@ def _launch_detail_queue_wake(wake_url: str) -> tuple[bool, str | None, bool]:
         return True, None, False
     except Exception as exc:
         return False, str(exc), False
+
 
 def _launch_list_queue_wake(wake_url: str) -> tuple[bool, str | None, bool]:
     """Launch Chrome wake URL unless another list wake happened recently."""
@@ -125,25 +146,10 @@ def _launch_list_queue_wake(wake_url: str) -> tuple[bool, str | None, bool]:
     except Exception as exc:
         return False, str(exc), False
 
-# ----------------------------------------------------------------
-# Resources: 暴露本地情报数据
-# ----------------------------------------------------------------
 
-@mcp.resource("jobsniper://persona")
-def get_persona() -> str:
-    """获取当前求职者的动态画像及其技能置信度"""
-    if not PERSONA_PATH.exists():
-        # 如果文件不存在，返回一个默认骨架
-        default_persona = {
-            "name": "User",
-            "goals": [],
-            "skills": {},
-            "audit_log": []
-        }
-        return json.dumps(default_persona, indent=2, ensure_ascii=False)
-    
-    with open(PERSONA_PATH, "r", encoding="utf-8") as f:
-        return f.read()
+# ----------------------------------------------------------------
+# 岗位库 helper
+# ----------------------------------------------------------------
 
 def _platform_vault_path(platform: str) -> Path:
     normalized = platform.strip().lower()
@@ -168,6 +174,7 @@ def _read_text_file(file_path: Path) -> str:
     with open(file_path, "r", encoding="utf-8") as f:
         return f.read()
 
+
 def _find_job_files(vault_path: Path, keyword: str, company: str | None = None) -> list[Path]:
     normalized_keyword = keyword.strip().lower()
     normalized_company = company.strip().lower() if company else None
@@ -187,88 +194,10 @@ def _find_job_files(vault_path: Path, keyword: str, company: str | None = None) 
         matches.append(file_path)
     return sorted(matches)
 
-@mcp.resource("jobsniper://vault/positions/{platform}/{path_to_job}")
-def get_position_detail(platform: str, path_to_job: str) -> str:
-    """按自然嵌套路径读取岗位详情 Markdown。"""
-    try:
-        vault_path = _platform_vault_path(platform)
-        relative_path = _safe_relative_path(path_to_job)
-    except ValueError as exc:
-        return str(exc)
-
-    file_path = vault_path / relative_path
-    if file_path.suffix != ".md":
-        file_path = file_path.with_suffix(".md")
-    try:
-        file_path.resolve().relative_to(vault_path.resolve())
-    except ValueError:
-        return "path_to_job must stay inside the platform vault"
-
-    if not file_path.exists():
-        return f"未找到岗位详情文件: {file_path}"
-    return _read_text_file(file_path)
 
 # ----------------------------------------------------------------
-# Tools: 暴露操作指令
+# 归档/采集 helper
 # ----------------------------------------------------------------
-
-@mcp.tool()
-def find_job_detail(platform: str, keyword: str, company: str | None = None, limit: int = 5) -> str:
-    """
-    在自然嵌套岗位库中按文件名搜索岗位详情。
-    参数:
-    - platform: zhilian 或 boss
-    - keyword: 岗位名或文件名关键词
-    - company: 可选公司名关键词
-    - limit: 最多返回的匹配数量
-    """
-    try:
-        vault_path = _platform_vault_path(platform)
-    except ValueError as exc:
-        return _json_response({"ok": False, "error": str(exc)})
-
-    if limit <= 0:
-        return _json_response({"ok": False, "error": "limit must be greater than 0"})
-
-    matches = _find_job_files(vault_path, keyword, company)[:limit]
-    return _json_response({
-        "ok": True,
-        "platform": platform,
-        "keyword": keyword,
-        "company": company,
-        "count": len(matches),
-        "matches": [
-            {
-                "path": str(path),
-                "relative_path": str(path.relative_to(vault_path)),
-                "resource_uri": f"jobsniper://vault/positions/{platform}/{path.relative_to(vault_path)}",
-            }
-            for path in matches
-        ],
-    })
-
-def _json_response(payload: dict[str, Any]) -> str:
-    return json.dumps(payload, indent=2, ensure_ascii=False)
-
-def _base64url_utf8(value: str) -> str:
-    encoded = base64.urlsafe_b64encode(value.encode("utf-8")).decode("ascii")
-    return encoded.rstrip("=")
-
-def _windows_path(path: str) -> str:
-    try:
-        result = subprocess.run(
-            ["wslpath", "-w", path],
-            check=True,
-            capture_output=True,
-            text=True,
-        )
-        return result.stdout.strip()
-    except Exception:
-        return path
-
-def _safe_keyword_dir(keyword: str) -> str:
-    cleaned = re.sub(r'[\\/:*?"<>|]+', "_", keyword).strip()
-    return cleaned or "Unknown"
 
 def _job_category_dir(keyword: str, task: dict[str, str], vault_path: Path) -> Path:
     industry_dir = _safe_keyword_dir(task["industry"])
@@ -403,6 +332,88 @@ def _launch_zhilian_with_url(collection_url: str, keyword: str, launch_label: st
         result["error"] = f"Failed to launch Chrome: {exc}"
 
     return _json_response(result)
+
+# ----------------------------------------------------------------
+# Resources: 暴露本地情报数据
+# ----------------------------------------------------------------
+
+@mcp.resource("jobsniper://persona")
+def get_persona() -> str:
+    """获取当前求职者的动态画像及其技能置信度"""
+    if not PERSONA_PATH.exists():
+        # 如果文件不存在，返回一个默认骨架
+        default_persona = {
+            "name": "User",
+            "goals": [],
+            "skills": {},
+            "audit_log": []
+        }
+        return json.dumps(default_persona, indent=2, ensure_ascii=False)
+
+    with open(PERSONA_PATH, "r", encoding="utf-8") as f:
+        return f.read()
+
+
+@mcp.resource("jobsniper://vault/positions/{platform}/{path_to_job}")
+def get_position_detail(platform: str, path_to_job: str) -> str:
+    """按自然嵌套路径读取岗位详情 Markdown。"""
+    try:
+        vault_path = _platform_vault_path(platform)
+        relative_path = _safe_relative_path(path_to_job)
+    except ValueError as exc:
+        return str(exc)
+
+    file_path = vault_path / relative_path
+    if file_path.suffix != ".md":
+        file_path = file_path.with_suffix(".md")
+    try:
+        file_path.resolve().relative_to(vault_path.resolve())
+    except ValueError:
+        return "path_to_job must stay inside the platform vault"
+
+    if not file_path.exists():
+        return f"未找到岗位详情文件: {file_path}"
+    return _read_text_file(file_path)
+
+
+# ----------------------------------------------------------------
+# Tools: 暴露操作指令
+# ----------------------------------------------------------------
+
+@mcp.tool()
+def find_job_detail(platform: str, keyword: str, company: str | None = None, limit: int = 5) -> str:
+    """
+    在自然嵌套岗位库中按文件名搜索岗位详情。
+    参数:
+    - platform: zhilian 或 boss
+    - keyword: 岗位名或文件名关键词
+    - company: 可选公司名关键词
+    - limit: 最多返回的匹配数量
+    """
+    try:
+        vault_path = _platform_vault_path(platform)
+    except ValueError as exc:
+        return _json_response({"ok": False, "error": str(exc)})
+
+    if limit <= 0:
+        return _json_response({"ok": False, "error": "limit must be greater than 0"})
+
+    matches = _find_job_files(vault_path, keyword, company)[:limit]
+    return _json_response({
+        "ok": True,
+        "platform": platform,
+        "keyword": keyword,
+        "company": company,
+        "count": len(matches),
+        "matches": [
+            {
+                "path": str(path),
+                "relative_path": str(path.relative_to(vault_path)),
+                "resource_uri": f"jobsniper://vault/positions/{platform}/{path.relative_to(vault_path)}",
+            }
+            for path in matches
+        ],
+    })
 
 @mcp.tool()
 def launch_zhilian_job_list_collection(
