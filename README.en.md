@@ -87,7 +87,7 @@ See [docs/CODING_GUIDELINES.md](docs/CODING_GUIDELINES.md) for detailed naming r
 Install Python dependencies:
 
 ```bash
-cd /home/xstars/programs/JobSniper
+cd /path/to/JobSniper
 python3 -m venv venv
 venv/bin/pip install -r requirements.txt
 ```
@@ -98,9 +98,9 @@ MCP client configuration example:
 {
   "mcpServers": {
     "jobsniper": {
-      "command": "/home/xstars/programs/JobSniper/venv/bin/python",
-      "args": ["/home/xstars/programs/JobSniper/mcp_server.py"],
-      "cwd": "/home/xstars/programs/JobSniper"
+      "command": "/path/to/JobSniper/venv/bin/python",
+      "args": ["/path/to/JobSniper/mcp_server.py"],
+      "cwd": "/path/to/JobSniper"
     }
   }
 }
@@ -109,7 +109,7 @@ MCP client configuration example:
 Protocol-level smoke test:
 
 ```bash
-cd /home/xstars/programs/JobSniper
+cd /path/to/JobSniper
 venv/bin/python scraping_layer/scripts/smoke_mcp_server.py --stdio
 ```
 
@@ -305,7 +305,7 @@ scraping_layer/joblens
 Build the Chrome extension:
 
 ```bash
-cd /home/xstars/programs/JobSniper/scraping_layer/joblens
+cd /path/to/JobSniper/scraping_layer/joblens
 npm install
 npm run build
 ```
@@ -353,21 +353,21 @@ archive_joblens_outputs(keyword="人工智能讲师", platform="zhilian", dry_ru
 Python smoke test:
 
 ```bash
-cd /home/xstars/programs/JobSniper
+cd /path/to/JobSniper
 venv/bin/python scraping_layer/scripts/smoke_mcp_server.py
 ```
 
 MCP stdio smoke test:
 
 ```bash
-cd /home/xstars/programs/JobSniper
+cd /path/to/JobSniper
 venv/bin/python scraping_layer/scripts/smoke_mcp_server.py --stdio
 ```
 
 Joblens build:
 
 ```bash
-cd /home/xstars/programs/JobSniper/scraping_layer/joblens
+cd /path/to/JobSniper/scraping_layer/joblens
 npm run build
 ```
 
