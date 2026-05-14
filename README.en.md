@@ -159,7 +159,7 @@ Collects the Zhilian platform job menu: an industry-function-occupation hierarch
 Behavior:
 
 - Opens the Zhilian homepage
-- Adds `clipper_keyword_discovery=1`
+- Adds `joblens_keyword_discovery=1`
 - Lets the Joblens extension export a keyword discovery Markdown file
 
 Output filename:
@@ -307,7 +307,7 @@ Build the Chrome extension:
 ```bash
 cd /home/xstars/programs/JobSniper/scraping_layer/joblens
 npm install
-npm run build:chrome
+npm run build
 ```
 
 After building, reload the extension in Chrome's extension management page so the new background queue logic takes effect.
@@ -368,7 +368,7 @@ Joblens build:
 
 ```bash
 cd /home/xstars/programs/JobSniper/scraping_layer/joblens
-npm run build:chrome
+npm run build
 ```
 
 Git hygiene:

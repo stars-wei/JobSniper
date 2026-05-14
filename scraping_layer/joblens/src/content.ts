@@ -1,20 +1,29 @@
-import browser from "./utils/browser-polyfill";
+/**
+ * Joblens - Content Script
+ *
+ * Injected into job platform pages (e.g., zhaopin.com) to parse job listings and details.
+ * Communicates with the background script to manage queues and save results.
+ */
+
+export {};
 
 declare global {
     interface Window {
-        obsidianClipperGeneration?: number;
+        joblensGeneration?: number;
     }
 }
 
 (function() {
-    window.obsidianClipperGeneration = (window.obsidianClipperGeneration ?? 0) + 1;
-    const myGeneration = window.obsidianClipperGeneration;
+    // Avoid multiple injections
+    window.joblensGeneration = (window.joblensGeneration ?? 0) + 1;
+    const myGeneration = window.joblensGeneration;
+
     const harvestedJobs = new Map<string, any>();
     const isZhilianPage = window.location.hostname.includes('zhaopin.com');
     const debugEnabled = window.location.href.includes("debug=1");
-    const harvesterVersion = "v1.10.0";
-    const harvestSessionKey = "zhilianHarvesterSessionV1";
-    const keywordBatchSessionKey = "zhilianKeywordBatchSessionV1";
+    const harvesterVersion = "v2.0.0";
+    const harvestSessionKey = "joblensHarvesterSession";
+    const keywordBatchSessionKey = "joblensKeywordBatchSession";
     const autoPageLimit = 30;
     const manualPageLimitMax = 50;
 
@@ -101,14 +110,14 @@ declare global {
     function debugLog(label: string, payload?: unknown) {
         if (!debugEnabled) return;
         if (payload === undefined) {
-            console.info(`[Zhilian Harvester] ${label}`);
+            console.info(`[Joblens] ${label}`);
             return;
         }
 
         try {
-            console.info(`[Zhilian Harvester] ${label} ${JSON.stringify(payload)}`);
+            console.info(`[Joblens] ${label} ${JSON.stringify(payload)}`);
         } catch (e) {
-            console.info(`[Zhilian Harvester] ${label}`, payload);
+            console.info(`[Joblens] ${label}`, payload);
         }
     }
 
@@ -120,12 +129,12 @@ declare global {
             reader.onload = async function() {
                 const dataUrl = reader.result as string;
                 try {
-                    const response = await browser.runtime.sendMessage({
+                    const response = await chrome.runtime.sendMessage({
                         action: "finalDownloadOnly",
                         dataUrl,
                         fileName,
                         isAuto
-                    }) as any;
+                    });
                     resolve(response);
                 } catch (e) {
                     resolve({ success: false, error: e instanceof Error ? e.message : String(e) });
@@ -135,43 +144,43 @@ declare global {
         });
     }
 
-    function getClipperPageLimit(): number {
+    function getJoblensPageLimit(): number {
         const params = new URLSearchParams(window.location.search);
         if (isHarvestTestMode()) return 1;
-        const pageParam = params.get("clipper_pages");
-        if (!pageParam || pageParam === "auto" || params.get("clipper_auto_pages") === "1") return autoPageLimit;
-        const rawValue = Number.parseInt(pageParam, 10);
-        if (!Number.isFinite(rawValue) || rawValue < 1) return 1;
+        const pageParam = params.get("joblens_pages");
+        if (!pageParam || pageParam === "auto" || params.get("joblens_auto_pages") === "1") return autoPageLimit;
+        const rawValue = parseInt(pageParam, 10);
+        if (isNaN(rawValue) || rawValue < 1) return 1;
         return Math.min(rawValue, manualPageLimitMax);
     }
 
     function isAutoPagingMode(): boolean {
         if (isHarvestTestMode()) return false;
         const params = new URLSearchParams(window.location.search);
-        const pageParam = params.get("clipper_pages");
-        return !pageParam || pageParam === "auto" || params.get("clipper_auto_pages") === "1";
+        const pageParam = params.get("joblens_pages");
+        return !pageParam || pageParam === "auto" || params.get("joblens_auto_pages") === "1";
     }
 
     function isDetailTestMode(): boolean {
         const params = new URLSearchParams(window.location.search);
-        return params.get("clipper_detail_test") === "1";
+        return params.get("joblens_detail_test") === "1";
     }
 
     function getDetailTestLimit(): number {
         const params = new URLSearchParams(window.location.search);
-        const rawValue = Number.parseInt(params.get("clipper_detail_limit") || "3", 10);
-        if (!Number.isFinite(rawValue) || rawValue < 1) return 3;
+        const rawValue = parseInt(params.get("joblens_detail_limit") || "3", 10);
+        if (isNaN(rawValue) || rawValue < 1) return 3;
         return Math.min(rawValue, 5);
     }
 
     function isHarvestTestMode(): boolean {
         const params = new URLSearchParams(window.location.search);
-        return params.get("clipper_test") === "1" || params.get("clipper_sample") === "1";
+        return params.get("joblens_test") === "1" || params.get("joblens_sample") === "1";
     }
 
     function isKeywordDiscoveryMode(): boolean {
         const params = new URLSearchParams(window.location.search);
-        return params.get("clipper_keyword_discovery") === "1";
+        return params.get("joblens_keyword_discovery") === "1";
     }
 
     function isDirectJobDetailMode(): boolean {
@@ -181,17 +190,17 @@ declare global {
 
     function isDetailQueueWakeMode(): boolean {
         const params = new URLSearchParams(window.location.search);
-        return params.get("clipper_detail_queue") === "1";
+        return params.get("joblens_detail_queue") === "1";
     }
 
     function isListQueueMode(): boolean {
         const params = new URLSearchParams(window.location.search);
-        return params.get("clipper_list_queue") === "1";
+        return params.get("joblens_list_queue") === "1";
     }
 
     function isListQueueWakeMode(): boolean {
         const params = new URLSearchParams(window.location.search);
-        return params.get("clipper_list_queue_wake") === "1";
+        return params.get("joblens_list_queue_wake") === "1";
     }
 
     function getDirectJobDetailKeyword(): string {
@@ -201,8 +210,8 @@ declare global {
 
     function getBatchKeywordsParam(): string {
         const params = new URLSearchParams(window.location.search);
-        return params.get("clipper_batch_keywords")
-            || params.get("clipper_keywords")
+        return params.get("joblens_batch_keywords")
+            || params.get("joblens_keywords")
             || "";
     }
 
@@ -225,7 +234,7 @@ declare global {
 
     function getPageModeKey(): string {
         if (isHarvestTestMode()) return "test";
-        return isAutoPagingMode() ? "auto" : `limit:${getClipperPageLimit()}`;
+        return isAutoPagingMode() ? "auto" : `limit:${getJoblensPageLimit()}`;
     }
 
     function decodeBase64Utf8(value: string | null): string {
@@ -280,17 +289,17 @@ declare global {
 
     function getCurrentPageFromUrl(): number {
         const url = new URL(window.location.href);
-        const queryPage = Number.parseInt(url.searchParams.get("p") || url.searchParams.get("page") || "", 10);
-        if (Number.isFinite(queryPage) && queryPage > 0) return queryPage;
+        const queryPage = parseInt(url.searchParams.get("p") || url.searchParams.get("page") || "", 10);
+        if (!isNaN(queryPage) && queryPage > 0) return queryPage;
 
         const pathPage = url.pathname.match(/\/p(\d+)(?:\/)?$/);
-        const pathPageNumber = pathPage ? Number.parseInt(pathPage[1], 10) : NaN;
-        return Number.isFinite(pathPageNumber) && pathPageNumber > 0 ? pathPageNumber : 1;
+        const pathPageNumber = pathPage ? parseInt(pathPage[1], 10) : NaN;
+        return !isNaN(pathPageNumber) && pathPageNumber > 0 ? pathPageNumber : 1;
     }
 
     function getTargetCityId(): string {
         const params = new URLSearchParams(window.location.search);
-        const cityFromParams = params.get("clipper_city")
+        const cityFromParams = params.get("joblens_city")
             || params.get("cityId")
             || params.get("jl")
             || (params.get("city") === "上海" ? "538" : "");
@@ -324,7 +333,7 @@ declare global {
         return [
             getStableKeywordIdentity(),
             getTargetCityId(),
-            isAutoPagingMode() ? "auto" : getClipperPageLimit().toString()
+            isAutoPagingMode() ? "auto" : getJoblensPageLimit().toString()
         ].join("|");
     }
 
@@ -367,7 +376,7 @@ declare global {
     }
 
     function shouldNormalizeZhilianSearchUrl(): boolean {
-        if (!isZhilianPage || !window.location.href.includes("clipper_auto=1")) return false;
+        if (!isZhilianPage || !window.location.href.includes("joblens_auto=1")) return false;
         const normalizedUrl = normalizeZhilianSearchUrl();
         return normalizedUrl !== window.location.href;
     }
@@ -393,20 +402,20 @@ declare global {
         url.searchParams.set("kw", keyword);
         url.searchParams.set("jl", cityId);
         url.searchParams.set("cityId", cityId);
-        url.searchParams.set("clipper_auto", "1");
-        url.searchParams.set("clipper_city", cityId);
+        url.searchParams.set("joblens_auto", "1");
+        url.searchParams.set("joblens_city", cityId);
         const keywordB64 = encodeBase64Utf8(keyword);
         if (keywordB64) url.searchParams.set("kw64", keywordB64);
 
         const pageParam = new URLSearchParams(window.location.search);
-        if (!pageParam.has("clipper_pages") || pageParam.get("clipper_pages") === "auto") {
-            url.searchParams.set("clipper_pages", "auto");
-        } else if (pageParam.get("clipper_auto_pages") === "1") {
-            url.searchParams.set("clipper_auto_pages", "1");
+        if (!pageParam.has("joblens_pages") || pageParam.get("joblens_pages") === "auto") {
+            url.searchParams.set("joblens_pages", "auto");
+        } else if (pageParam.get("joblens_auto_pages") === "1") {
+            url.searchParams.set("joblens_auto_pages", "1");
         } else {
-            const pageLimit = getClipperPageLimit();
+            const pageLimit = getJoblensPageLimit();
             if (pageLimit > 1) {
-                url.searchParams.set("clipper_pages", String(pageLimit));
+                url.searchParams.set("joblens_pages", String(pageLimit));
             }
         }
 
@@ -415,12 +424,12 @@ declare global {
         }
 
         if (isHarvestTestMode()) {
-            url.searchParams.set("clipper_test", "1");
+            url.searchParams.set("joblens_test", "1");
         }
 
         const rawBatchKeywords = getBatchKeywordsParam();
         if (rawBatchKeywords) {
-            url.searchParams.set("clipper_batch_keywords", rawBatchKeywords);
+            url.searchParams.set("joblens_batch_keywords", rawBatchKeywords);
         }
 
         if (pageNumber > 1) {
@@ -432,7 +441,7 @@ declare global {
 
     async function readHarvestSession(): Promise<any | null> {
         try {
-            const stored = await browser.storage.local.get(harvestSessionKey) as Record<string, any>;
+            const stored = await chrome.storage.local.get(harvestSessionKey);
             if (stored?.[harvestSessionKey]) return stored[harvestSessionKey];
         } catch (e) {}
 
@@ -446,8 +455,8 @@ declare global {
 
     async function readKeywordBatchSession(): Promise<KeywordBatchSession | null> {
         try {
-            const stored = await browser.storage.local.get(keywordBatchSessionKey) as Record<string, KeywordBatchSession>;
-            if (stored?.[keywordBatchSessionKey]) return stored[keywordBatchSessionKey];
+            const stored = await chrome.storage.local.get(keywordBatchSessionKey);
+            if (stored?.[keywordBatchSessionKey]) return stored[keywordBatchSessionKey] as KeywordBatchSession;
         } catch (e) {}
 
         try {
@@ -503,7 +512,7 @@ declare global {
         };
 
         try {
-            await browser.storage.local.set({ [harvestSessionKey]: session });
+            await chrome.storage.local.set({ [harvestSessionKey]: session });
         } catch (e) {}
 
         try {
@@ -513,7 +522,7 @@ declare global {
 
     async function clearHarvestSession() {
         try {
-            await browser.storage.local.remove(harvestSessionKey);
+            await chrome.storage.local.remove(harvestSessionKey);
         } catch (e) {}
 
         try {
@@ -523,7 +532,7 @@ declare global {
 
     async function saveKeywordBatchSession(session: KeywordBatchSession) {
         try {
-            await browser.storage.local.set({ [keywordBatchSessionKey]: session });
+            await chrome.storage.local.set({ [keywordBatchSessionKey]: session });
         } catch (e) {}
 
         try {
@@ -533,7 +542,7 @@ declare global {
 
     async function clearKeywordBatchSession() {
         try {
-            await browser.storage.local.remove(keywordBatchSessionKey);
+            await chrome.storage.local.remove(keywordBatchSessionKey);
         } catch (e) {}
 
         try {
@@ -575,7 +584,7 @@ declare global {
         if (!targetKeyword) return null;
         if (!isSameKeyword(currentKeyword, targetKeyword)) {
             if (overlay) {
-                overlay.innerText = `智联采集器 (${harvesterVersion})\n批量模式：准备第 ${session.currentIndex + 1}/${session.keywords.length} 个关键词\n正在切换到：${targetKeyword}`;
+                overlay.innerText = `Joblens (${harvesterVersion})\n批量模式：准备第 ${session.currentIndex + 1}/${session.keywords.length} 个关键词\n正在切换到：${targetKeyword}`;
             }
             return buildKeywordSearchUrl(targetKeyword, 1);
         }
@@ -615,7 +624,7 @@ declare global {
 
         if (overlay) {
             overlay.style.background = "#2563eb";
-            overlay.innerText = `智联采集器 (${harvesterVersion})\n批量模式：第 ${nextSession.currentIndex + 1}/${nextSession.keywords.length} 个关键词\n正在切换到：${nextKeyword}`;
+            overlay.innerText = `Joblens (${harvesterVersion})\n批量模式：第 ${nextSession.currentIndex + 1}/${nextSession.keywords.length} 个关键词\n正在切换到：${nextKeyword}`;
         }
 
         window.location.replace(nextUrl);
@@ -908,26 +917,7 @@ declare global {
         "上海": ["浦东", "黄浦", "徐汇", "长宁", "静安", "普陀", "虹口", "杨浦", "闵行", "宝山", "嘉定", "金山", "松江", "青浦", "奉贤", "崇明"],
         "广州": ["越秀", "荔湾", "海珠", "天河", "白云", "黄埔", "番禺", "花都", "南沙", "从化", "增城"],
         "深圳": ["罗湖", "福田", "南山", "宝安", "龙岗", "盐田", "龙华", "坪山", "光明", "大鹏"],
-        "杭州": ["上城", "拱墅", "西湖", "滨江", "萧山", "余杭", "临平", "钱塘", "富阳", "临安", "桐庐", "淳安", "建德"],
-        "成都": ["锦江", "青羊", "金牛", "武侯", "成华", "龙泉驿", "青白江", "新都", "温江", "双流", "郫都", "新津", "都江堰", "彭州", "邛崃", "崇州", "简阳", "金堂", "大邑", "蒲江"],
-        "武汉": ["江岸", "江汉", "硚口", "汉阳", "武昌", "青山", "洪山", "东西湖", "汉南", "蔡甸", "江夏", "黄陂", "新洲"],
-        "南京": ["玄武", "秦淮", "建邺", "鼓楼", "浦口", "栖霞", "雨花台", "江宁", "六合", "溧水", "高淳"],
-        "苏州": ["姑苏", "虎丘", "吴中", "相城", "吴江", "常熟", "张家港", "昆山", "太仓"],
-        "西安": ["新城", "碑林", "莲湖", "灞桥", "未央", "雁塔", "阎良", "临潼", "长安", "高陵", "鄠邑", "蓝田", "周至"],
-        "天津": ["和平", "河东", "河西", "南开", "河北", "红桥", "东丽", "西青", "津南", "北辰", "武清", "宝坻", "滨海", "宁河", "静海", "蓟州"],
-        "重庆": ["万州", "涪陵", "渝中", "大渡口", "江北", "沙坪坝", "九龙坡", "南岸", "北碚", "渝北", "巴南", "黔江", "长寿", "江津", "合川", "永川", "南川", "璧山", "铜梁", "潼南", "荣昌", "开州", "梁平", "武隆"],
-        "青岛": ["市南", "市北", "黄岛", "崂山", "李沧", "城阳", "即墨", "胶州", "平度", "莱西"],
-        "济南": ["历下", "市中", "槐荫", "天桥", "历城", "长清", "章丘", "济阳", "莱芜", "钢城", "平阴", "商河"],
-        "郑州": ["中原", "二七", "管城", "金水", "上街", "惠济", "中牟", "巩义", "荥阳", "新密", "新郑", "登封"],
-        "长沙": ["芙蓉", "天心", "岳麓", "开福", "雨花", "望城", "长沙县", "浏阳", "宁乡"],
-        "合肥": ["瑶海", "庐阳", "蜀山", "包河", "长丰", "肥东", "肥西", "庐江", "巢湖"],
-        "宁波": ["海曙", "江北", "北仑", "镇海", "鄞州", "奉化", "象山", "宁海", "余姚", "慈溪"],
-        "无锡": ["梁溪", "锡山", "惠山", "滨湖", "新吴", "江阴", "宜兴"],
-        "厦门": ["思明", "海沧", "湖里", "集美", "同安", "翔安"],
-        "福州": ["鼓楼", "台江", "仓山", "马尾", "晋安", "长乐", "闽侯", "连江", "罗源", "闽清", "永泰", "平潭", "福清"],
-        "沈阳": ["和平", "沈河", "大东", "皇姑", "铁西", "苏家屯", "浑南", "沈北", "于洪", "辽中", "康平", "法库", "新民"],
-        "大连": ["中山", "西岗", "沙河口", "甘井子", "旅顺口", "金州", "普兰店", "瓦房店", "庄河", "长海"],
-        "济宁": ["任城", "兖州", "微山", "鱼台", "金乡", "嘉祥", "汶上", "泗水", "梁山", "曲阜", "邹城"]
+        "杭州": ["上城", "拱墅", "西湖", "滨江", "萧山", "余杭", "临平", "钱塘", "富阳", "临安", "桐庐", "淳安", "建德"]
     };
 
     const cityNames = Object.keys(cityDistricts);
@@ -1100,13 +1090,6 @@ declare global {
             ? uniqueCandidates.sort((a, b) => getAreaScore(b) - getAreaScore(a))[0]
             : "未知";
 
-        debugLog("area candidates", {
-            structuredJobArea,
-            candidates: uniqueCandidates,
-            selected: selectedArea,
-            textSnippet: cleanText(card.innerText).slice(0, 200)
-        });
-
         if (uniqueCandidates.length > 0) {
             return selectedArea;
         }
@@ -1165,23 +1148,13 @@ declare global {
 
     function extractSkillTags(card: HTMLElement): string[] {
         const tagSelectors = [
-            "[class*='tag']",
-            "[class*='Tag']",
-            "[class*='label']",
-            "[class*='Label']",
-            "[class*='skill']",
-            "[class*='Skill']",
-            "li"
+            "[class*='tag']", "[class*='Tag']", "[class*='label']", "[class*='Label']", "[class*='skill']", "[class*='Skill']", "li"
         ];
 
         const tags: string[] = [];
-        const rawTags: string[] = [];
         const selectorText = tagSelectors.join(",");
         const jobTagBlocks = Array.from(card.querySelectorAll("[class*='jobinfo__tag'], [class*='job-info__tag'], [class*='jobInfo__tag']")) as HTMLElement[];
-        if (jobTagBlocks.length === 0) {
-            debugLog("skill tags", { raw: rawTags, selected: [] });
-            return [];
-        }
+        if (jobTagBlocks.length === 0) return [];
 
         const searchRoot: ParentNode = jobTagBlocks[0];
 
@@ -1191,16 +1164,13 @@ declare global {
 
             const text = cleanText(el.innerText);
             if (!text || text.includes("\n")) return;
-            rawTags.push(text);
             if (isInsideCompanyMetaBlock(el, card)) return;
             if (hasNestedSkillCandidate(el, selectorText)) return;
             if (isNonSkillTag(text)) return;
             tags.push(text);
         });
 
-        const selectedTags = normalizeSkillTags(tags).slice(0, 12);
-        debugLog("skill tags", { raw: rawTags, selected: selectedTags });
-        return selectedTags;
+        return normalizeSkillTags(tags).slice(0, 12);
     }
 
     function normalizeSkillTags(tags: string[]): string[] {
@@ -1208,10 +1178,7 @@ declare global {
         return uniqueTags.filter(tag => {
             if (!/[\s,，、/]+/.test(tag)) return true;
 
-            const parts = tag
-                .split(/[\s,，、/]+/)
-                .map(cleanText)
-                .filter(Boolean);
+            const parts = tag.split(/[\s,，、/]+/).map(cleanText).filter(Boolean);
             if (parts.length < 2) return true;
 
             const knownPartCount = parts.filter(part => uniqueTags.includes(part)).length;
@@ -1297,22 +1264,7 @@ declare global {
                 : industryCandidates.find(candidate => lineForIndustry.includes(candidate)) || "未知";
         }
 
-        debugLog("company meta", {
-            companyTagTexts,
-            metaLines,
-            companyTailText,
-            inferredIndustryFromTail,
-            companyName: normalizedCompanyName,
-            selected: { companyType, financingStage, companySize, industry },
-            textSnippet: text.slice(0, 200)
-        });
-
-        return {
-            companyType,
-            financingStage,
-            companySize,
-            industry
-        };
+        return { companyType, financingStage, companySize, industry };
     }
 
     function captureRawJobSnapshot(card: HTMLElement, title: string): RawJobSnapshot {
@@ -1325,12 +1277,11 @@ declare global {
     }
 
     function createRawCardsHtml(rawSnapshot: any): string {
-        const metadataJson = JSON.stringify(rawSnapshot.metadata, null, 2)
-            .replace(/<\/script/gi, "<\\/script");
+        const metadataJson = JSON.stringify(rawSnapshot.metadata, null, 2).replace(/<\/script/gi, "<\\/script");
         const sections = rawSnapshot.jobs.map((job: any) => {
             const raw = job.raw || {};
             return [
-                `<section class="zhilian-raw-card" data-index="${job.index}" data-job-url="${escapeHtmlAttribute(job.jobUrl)}" data-company-url="${escapeHtmlAttribute(job.companyUrl)}">`,
+                `<section class="joblens-raw-card" data-index="${job.index}" data-job-url="${escapeHtmlAttribute(job.jobUrl)}" data-company-url="${escapeHtmlAttribute(job.companyUrl)}">`,
                 `<!-- titleText: ${escapeHtmlAttribute(raw.titleText)} -->`,
                 raw.cardHtml || "",
                 `</section>`
@@ -1338,30 +1289,19 @@ declare global {
         }).join("\n\n");
 
         return [
-            "<!doctype html>",
-            "<html>",
-            "<head>",
-            "  <meta charset=\"utf-8\">",
-            `  <title>Zhilian Raw Cards - ${escapeHtmlAttribute(rawSnapshot.metadata.keyword)}</title>`,
-            "</head>",
-            "<body>",
-            "  <script type=\"application/json\" id=\"zhilian-raw-metadata\">",
+            "<!doctype html>", "<html>", "<head>", "  <meta charset=\"utf-8\">",
+            `  <title>Joblens Raw Cards - ${escapeHtmlAttribute(rawSnapshot.metadata.keyword)}</title>`,
+            "</head>", "<body>",
+            "  <script type=\"application/json\" id=\"joblens-raw-metadata\">",
             metadataJson,
             "  </script>",
             sections,
-            "</body>",
-            "</html>"
+            "</body>", "</html>"
         ].join("\n");
     }
 
     function extractDetailTitle(): string {
-        const selectors = [
-            "h1",
-            "[class*='job-name']",
-            "[class*='jobName']",
-            "[class*='position-name']",
-            "[class*='title']"
-        ];
+        const selectors = ["h1", "[class*='job-name']", "[class*='jobName']", "[class*='position-name']", "[class*='title']"];
         for (const selector of selectors) {
             const element = document.querySelector(selector) as HTMLElement | null;
             const text = cleanText(element?.innerText || element?.textContent);
@@ -1371,14 +1311,7 @@ declare global {
     }
 
     function extractDetailWorkAddress(): string {
-        const selectors = [
-            "[class*='address']",
-            "[class*='Address']",
-            "[class*='location']",
-            "[class*='Location']",
-            "[class*='work-place']",
-            "[class*='workPlace']"
-        ];
+        const selectors = ["[class*='address']", "[class*='Address']", "[class*='location']", "[class*='Location']", "[class*='work-place']", "[class*='workPlace']"];
         for (const selector of selectors) {
             const elements = Array.from(document.querySelectorAll(selector)) as HTMLElement[];
             for (const element of elements) {
@@ -1395,16 +1328,9 @@ declare global {
 
     function extractDetailDescription(): string {
         const selectors = [
-            "[class*='describ']",
-            "[class*='Describ']",
-            "[class*='description']",
-            "[class*='Description']",
-            "[class*='job-detail']",
-            "[class*='jobDetail']",
-            "[class*='position-detail']",
-            "[class*='positionDetail']",
-            "[class*='detail-content']",
-            "[class*='detailContent']"
+            "[class*='describ']", "[class*='Describ']", "[class*='description']", "[class*='Description']",
+            "[class*='job-detail']", "[class*='jobDetail']", "[class*='position-detail']", "[class*='positionDetail']",
+            "[class*='detail-content']", "[class*='detailContent']"
         ];
         const candidates = selectors
             .flatMap(selector => Array.from(document.querySelectorAll(selector)) as HTMLElement[])
@@ -1415,7 +1341,7 @@ declare global {
 
         const main = document.querySelector("main") as HTMLElement | null;
         const mainText = cleanText(main?.innerText);
-        if (mainText.length >= 80) return mainText;
+        if (mainText && mainText.length >= 80) return mainText;
 
         return cleanText(document.body.innerText).slice(0, 6000);
     }
@@ -1424,18 +1350,13 @@ declare global {
         if (typeof value !== "string") return "";
         if (!/<[a-z][\s\S]*>/i.test(value)) return cleanText(value);
         const container = document.createElement("div");
-        container.innerHTML = value
-            .replace(/<br\s*\/?>/gi, "\n")
-            .replace(/<\/(div|p|li|section|article|h\d)>/gi, "\n");
+        container.innerHTML = value.replace(/<br\s*\/?>/gi, "\n").replace(/<\/(div|p|li|section|article|h\d)>/gi, "\n");
         return cleanText(container.innerText || container.textContent);
     }
 
     function normalizeDetailStringArray(value: unknown): string[] {
         if (Array.isArray(value)) {
-            return Array.from(new Set(value
-                .flatMap(item => normalizeDetailStringArray(item))
-                .map(item => cleanText(item))
-                .filter(Boolean)));
+            return Array.from(new Set(value.flatMap(item => normalizeDetailStringArray(item)).map(item => cleanText(item)).filter(Boolean)));
         }
         if (typeof value === "string") {
             const text = cleanText(value);
@@ -1449,46 +1370,27 @@ declare global {
     }
 
     function cleanUnknownText(value: unknown): string {
-        return typeof value === "string" || typeof value === "number"
-            ? cleanText(String(value))
-            : "";
+        return typeof value === "string" || typeof value === "number" ? cleanText(String(value)) : "";
     }
 
     function parseZhilianInitialState(): any | null {
-        const scripts = Array.from(document.scripts)
-            .map(script => script.textContent || "")
-            .filter(text => text.includes("__INITIAL_STATE__"));
-
+        const scripts = Array.from(document.scripts).map(script => script.textContent || "").filter(text => text.includes("__INITIAL_STATE__"));
         for (const scriptText of scripts) {
             const assignmentIndex = scriptText.indexOf("__INITIAL_STATE__");
             const objectStart = scriptText.indexOf("{", assignmentIndex);
             const objectEnd = scriptText.lastIndexOf("}");
             if (objectStart < 0 || objectEnd <= objectStart) continue;
-
-            const jsonText = scriptText.slice(objectStart, objectEnd + 1);
             try {
-                return JSON.parse(jsonText);
-            } catch (error) {
-                debugLog("detail initial state parse failed", {
-                    error: error instanceof Error ? error.message : String(error),
-                    snippet: jsonText.slice(0, 160)
-                });
-            }
+                return JSON.parse(scriptText.slice(objectStart, objectEnd + 1));
+            } catch (error) {}
         }
-
         return null;
     }
 
     function extractDetailTagsFromInitialState(position: Record<string, unknown>): string[] {
         const candidateFields = [
-            position.skillLabel,
-            position.skillLabels,
-            position.labels,
-            position.positionLabel,
-            position.positionLabels,
-            position.tagList,
-            position.tags,
-            position.keywords
+            position.skillLabel, position.skillLabels, position.labels, position.positionLabel,
+            position.positionLabels, position.tagList, position.tags, position.keywords
         ];
         return Array.from(new Set(candidateFields.flatMap(normalizeDetailStringArray)));
     }
@@ -1527,14 +1429,22 @@ declare global {
         };
     }
 
+    function isCaptchaPage(): boolean {
+        const bodyText = document.body.innerText || "";
+        const title = document.title || "";
+        const url = window.location.href;
+        const sample = bodyText.slice(0, 4000);
+        return (
+            /验证码|人机验证|安全验证|拦截/.test(title) ||
+            /验证码|人机验证|安全验证|请完成验证|点击验证|正在验证连接安全性|请勾选下方复选框|验证完成后.*重定向|Tencent Cloud EdgeOne|Protected by Tencent Cloud EdgeOne/i.test(sample) ||
+            /captcha|verify|challenge/i.test(url)
+        );
+    }
+
     function parseZhilianDetailPage(): ZhilianDetailResult {
         try {
             if (isCaptchaPage()) {
-                return {
-                    status: "failed",
-                    jobUrl: window.location.href.split("?")[0],
-                    error: "security verification page detected"
-                };
+                return { status: "failed", jobUrl: window.location.href.split("?")[0], error: "security verification page detected" };
             }
             const initialState = parseZhilianInitialState();
             const initialStateDetail = initialState ? parseDetailFromInitialState(initialState) : null;
@@ -1558,11 +1468,7 @@ declare global {
                 }
             };
         } catch (error) {
-            return {
-                status: "failed",
-                jobUrl: window.location.href.split("?")[0],
-                error: error instanceof Error ? error.message : String(error)
-            };
+            return { status: "failed", jobUrl: window.location.href.split("?")[0], error: error instanceof Error ? error.message : String(error) };
         }
     }
 
@@ -1578,11 +1484,7 @@ declare global {
     }
 
     function sanitizeArtifactNamePart(value: string, fallback: string): string {
-        const sanitized = cleanText(value)
-            .replace(/[\/\\?%*:|"<>]/g, "-")
-            .replace(/[\x00-\x1f\x80-\x9f]/g, "")
-            .replace(/\s+/g, "_")
-            .slice(0, 80);
+        const sanitized = cleanText(value).replace(/[\/\\?%*:|"<>]/g, "-").replace(/[\x00-\x1f\x80-\x9f]/g, "").replace(/\s+/g, "_").slice(0, 80);
         return sanitized || fallback;
     }
 
@@ -1593,73 +1495,12 @@ declare global {
     }
 
     function cloneDetailWithoutEmbeddedHtml(detail: ZhilianDetailResult, detailHtmlFileName?: string): ZhilianDetailResult {
-        const raw = detail.raw
-            ? { ...detail.raw }
-            : undefined;
+        const raw = detail.raw ? { ...detail.raw } : undefined;
         if (raw) {
             delete raw.detailHtml;
-            if (detailHtmlFileName) {
-                raw.detailHtmlFileName = detailHtmlFileName;
-            }
+            if (detailHtmlFileName) raw.detailHtmlFileName = detailHtmlFileName;
         }
-        return {
-            ...detail,
-            raw
-        };
-    }
-
-    async function exportDetailHtmlArtifacts(jobs: any[], keyword: string, timestamp: string, isAuto: boolean) {
-        const records: Array<{
-            index: number;
-            title: string;
-            jobUrl: string;
-            status: string;
-            detailHtmlFileName?: string;
-            downloadSuccess?: boolean;
-            downloadError?: string;
-        }> = [];
-
-        for (const [index, job] of jobs.entries()) {
-            const detail = job.detail as ZhilianDetailResult | undefined;
-            if (!detail) {
-                records.push({
-                    index: index + 1,
-                    title: job.title,
-                    jobUrl: job.url,
-                    status: "not_collected"
-                });
-                continue;
-            }
-
-            const detailHtml = detail.raw?.detailHtml;
-            if (detail.status !== "success" || !detailHtml) {
-                job.detail = cloneDetailWithoutEmbeddedHtml(detail);
-                records.push({
-                    index: index + 1,
-                    title: job.title,
-                    jobUrl: job.url,
-                    status: detail.status,
-                    downloadError: detail.error || "No detail HTML available"
-                });
-                continue;
-            }
-
-            const jobId = getZhilianJobIdForFile(job.url, index + 1);
-            const detailHtmlFileName = `ZHILIAN_DETAIL_TEST_RAW_${keyword}_${jobId}_${timestamp}.html`;
-            const response = await downloadTextFile(detailHtmlFileName, detailHtml, "text/html", isAuto);
-            job.detail = cloneDetailWithoutEmbeddedHtml(detail, detailHtmlFileName);
-            records.push({
-                index: index + 1,
-                title: job.title,
-                jobUrl: job.url,
-                status: detail.status,
-                detailHtmlFileName,
-                downloadSuccess: Boolean(response?.success),
-                downloadError: response?.success ? undefined : response?.error || "Download failed"
-            });
-        }
-
-        return records;
+        return { ...detail, raw };
     }
 
     function buildDetailMarkdownFileName(job: any): string {
@@ -1669,71 +1510,28 @@ declare global {
     }
 
     function createSingleDetailMarkdown(job: any, detail: ZhilianDetailResult, metadata: any): string {
-        let content = `---\n`;
-        content += `source: zhilian\n`;
-        content += `keyword: ${metadata.keyword}\n`;
-        content += `company: ${job.company}\n`;
-        content += `title: ${job.title}\n`;
-        content += `url: ${job.url}\n`;
-        content += `collected: ${metadata.collectedAt}\n`;
-        content += `---\n\n`;
+        let content = `---\nsource: zhilian\nkeyword: ${metadata.keyword}\ncompany: ${job.company}\ntitle: ${job.title}\nurl: ${job.url}\ncollected: ${metadata.collectedAt}\n---\n\n`;
         content += `# ${job.company}_${job.title}\n\n`;
-        content += `- 来源：智联招聘\n`;
-        content += `- 状态：详情页采集\n`;
-        content += `- 公司：[${job.company}](${job.companyUrl})\n`;
-        content += `- 列表地点：${job.area || "未知"}\n`;
-        content += `- 列表薪资：${job.salary || "未知"}\n`;
-        content += `- 列表经验：${job.exp || "未知"}\n`;
-        content += `- 列表学历：${job.edu || "未知"}\n`;
-        content += `- 岗位链接：[查看详情](${job.url})\n`;
-        content += `- 采集URL：${window.location.href}\n`;
-        content += `- 时间：${new Date().toLocaleString()}\n\n`;
-        content += `## 详情字段\n\n`;
-        content += `- 详情状态：${detail.status}\n`;
+        content += `- 来源：智联招聘\n- 状态：详情页采集\n- 公司：[${job.company}](${job.companyUrl})\n- 列表地点：${job.area || "未知"}\n- 列表薪资：${job.salary || "未知"}\n- 列表经验：${job.exp || "未知"}\n- 列表学历：${job.edu || "未知"}\n- 岗位链接：[查看详情](${job.url})\n- 采集URL：${window.location.href}\n- 时间：${new Date().toLocaleString()}\n\n`;
+        content += `## 详情字段\n\n- 详情状态：${detail.status}\n`;
         if (detail.status === "failed") {
             content += `- 失败原因：${detail.error || "未知"}\n`;
             return content;
         }
-        content += `- 解析来源：${detail.parseSource || "未知"}\n`;
-        content += `- 详情标题：${detail.detailTitle || "未知"}\n`;
-        content += `- 详情薪资：${detail.salary || "未知"}\n`;
-        content += `- 详情公司：${detail.companyName || "未知"}\n`;
-        content += `- 详情地址：${detail.workAddress || "未知"}\n`;
-        content += `- 详情 Raw HTML：${detail.raw?.detailHtmlFileName || "未知"}\n\n`;
-        content += `## 详情岗位标签\n\n`;
-        content += `${detail.detailTags?.length ? detail.detailTags.map(tag => `- ${tag}`).join("\n") : "- 未提供"}\n\n`;
-        content += `## 职位详情全文\n\n`;
-        content += `${detail.descriptionText || "未知"}\n\n`;
-        if (detail.companyIntro) {
-            content += `## 公司介绍\n\n`;
-            content += `${detail.companyIntro}\n\n`;
-        }
+        content += `- 解析来源：${detail.parseSource || "未知"}\n- 详情标题：${detail.detailTitle || "未知"}\n- 详情薪资：${detail.salary || "未知"}\n- 详情公司：${detail.companyName || "未知"}\n- 详情地址：${detail.workAddress || "未知"}\n- 详情 Raw HTML：${detail.raw?.detailHtmlFileName || "未知"}\n\n`;
+        content += `## 详情岗位标签\n\n${detail.detailTags?.length ? detail.detailTags.map(tag => `- ${tag}`).join("\n") : "- 未提供"}\n\n`;
+        content += `## 职位详情全文\n\n${detail.descriptionText || "未知"}\n\n`;
+        if (detail.companyIntro) content += `## 公司介绍\n\n${detail.companyIntro}\n\n`;
         if (detail.businessInfo && Object.values(detail.businessInfo).some(Boolean)) {
-            content += `## 工商信息摘要\n\n`;
-            content += `- 注册名称：${detail.businessInfo.registeredName || "未知"}\n`;
-            content += `- 注册资本：${detail.businessInfo.registeredCapital || "未知"}\n`;
-            content += `- 法定代表人：${detail.businessInfo.legalPerson || "未知"}\n`;
-            content += `- 成立时间：${detail.businessInfo.setupDate || "未知"}\n`;
-            content += `- 登记状态：${detail.businessInfo.epStatus || "未知"}\n`;
-            content += `- 工商行业：${detail.businessInfo.industry || "未知"}\n`;
-            content += `- 工商地址：${detail.businessInfo.location || "未知"}\n`;
-            if (detail.businessInfo.businessScope) {
-                content += `\n## 经营范围\n\n`;
-                content += `${detail.businessInfo.businessScope}\n`;
-            }
+            content += `## 工商信息摘要\n\n- 注册名称：${detail.businessInfo.registeredName || "未知"}\n- 注册资本：${detail.businessInfo.registeredCapital || "未知"}\n- 法定代表人：${detail.businessInfo.legalPerson || "未知"}\n- 成立时间：${detail.businessInfo.setupDate || "未知"}\n- 登记状态：${detail.businessInfo.epStatus || "未知"}\n- 工商行业：${detail.businessInfo.industry || "未知"}\n- 工商地址：${detail.businessInfo.location || "未知"}\n`;
+            if (detail.businessInfo.businessScope) content += `\n## 经营范围\n\n${detail.businessInfo.businessScope}\n`;
         }
-
         return content;
     }
 
     async function exportDirectJobDetailResult(overlay: HTMLElement) {
         const now = new Date();
-        const timestamp = now.getFullYear().toString() +
-            (now.getMonth() + 1).toString().padStart(2, '0') +
-            now.getDate().toString().padStart(2, '0') + '_' +
-            now.getHours().toString().padStart(2, '0') +
-            now.getMinutes().toString().padStart(2, '0') +
-            now.getSeconds().toString().padStart(2, '0');
+        const timestamp = now.getFullYear().toString() + (now.getMonth() + 1).toString().padStart(2, '0') + now.getDate().toString().padStart(2, '0') + '_' + now.getHours().toString().padStart(2, '0') + now.getMinutes().toString().padStart(2, '0') + now.getSeconds().toString().padStart(2, '0');
         const keyword = getDirectJobDetailKeyword();
         const detail = parseZhilianDetailPage();
         const job = {
@@ -1746,14 +1544,7 @@ declare global {
             edu: "未知",
             url: detail.jobUrl || window.location.href.split("?")[0]
         };
-        const metadata = {
-            platform: "zhilian",
-            keyword,
-            url: window.location.href,
-            collectedAt: now.toISOString(),
-            mode: "job_detail",
-            harvesterVersion
-        };
+        const metadata = { platform: "zhilian", keyword, url: window.location.href, collectedAt: now.toISOString(), mode: "job_detail", harvesterVersion };
         const companyName = sanitizeArtifactNamePart(job.company, "unknown_company");
         const jobTitle = sanitizeArtifactNamePart(job.title, "unknown_job");
         const markdownFileName = `ZHILIAN_DETAIL_${companyName}_${jobTitle}_${timestamp}.md`;
@@ -1771,31 +1562,14 @@ declare global {
             delete detail.raw.detailHtml;
         }
 
-        const markdownResponse = await downloadTextFile(
-            markdownFileName,
-            createSingleDetailMarkdown(job, detail, metadata),
-            "text/markdown",
-            true
-        );
+        const markdownResponse = await downloadTextFile(markdownFileName, createSingleDetailMarkdown(job, detail, metadata), "text/markdown", true);
+        if (saveJson) await downloadTextFile(manifestFileName, JSON.stringify({ metadata, markdownFileName, rawHtmlFileName, job, detail }, null, 2), "application/json", true);
 
-        if (saveJson) {
-            await downloadTextFile(
-                manifestFileName,
-                JSON.stringify({ metadata, markdownFileName, rawHtmlFileName, job, detail }, null, 2),
-                "application/json",
-                true
-            );
-        }
-
-        // Check for captcha on failure
         if (!markdownResponse?.success || detail.status === "failed") {
-            const isCaptcha = isCaptchaPage();
-            if (isCaptcha) {
+            if (isCaptchaPage()) {
                 overlay.style.background = "red";
                 overlay.innerText = `⚠️ 验证码拦截！\n请手动完成人机验证`;
-                playCaptchaAlert();
-                browser.runtime.sendMessage({ action: "captchaDetected" }).catch(() => {});
-                // Don't close tab — let user complete captcha manually
+                chrome.runtime.sendMessage({ action: "captchaDetected" }).catch(() => {});
                 return;
             }
         }
@@ -1808,135 +1582,10 @@ declare global {
             overlay.innerText = `详情文件下载失败：${markdownResponse?.error || "未知错误"}`;
         }
 
-        // Close the tab after download completes
-        setTimeout(() => {
-            browser.runtime.sendMessage({ action: "closeCurrentTab" }).catch(() => {
-                window.close();
-            });
-        }, 1500);
+        setTimeout(() => { chrome.runtime.sendMessage({ action: "closeCurrentTab" }).catch(() => { window.close(); }); }, 1500);
     }
 
-    function isCaptchaPage(): boolean {
-        const bodyText = document.body.innerText || "";
-        const title = document.title || "";
-        const url = window.location.href;
-        const sample = bodyText.slice(0, 4000);
-        return (
-            /验证码|人机验证|安全验证|拦截/.test(title) ||
-            /验证码|人机验证|安全验证|请完成验证|点击验证|正在验证连接安全性|请勾选下方复选框|验证完成后.*重定向|Tencent Cloud EdgeOne|Protected by Tencent Cloud EdgeOne/i.test(sample) ||
-            /captcha|verify|challenge/i.test(url)
-        );
-    }
-
-    function playCaptchaAlert(): void {
-        try {
-            const ctx = new (window.AudioContext || (window as any).webkitAudioContext)();
-            // Play three beeps: high-high-low
-            [800, 800, 600].forEach((freq, i) => {
-                const osc = ctx.createOscillator();
-                const gain = ctx.createGain();
-                osc.type = "square";
-                osc.frequency.value = freq;
-                gain.gain.value = 0.3;
-                osc.connect(gain);
-                gain.connect(ctx.destination);
-                osc.start(ctx.currentTime + i * 0.3);
-                osc.stop(ctx.currentTime + i * 0.3 + 0.25);
-            });
-        } catch {}
-    }
-
-    async function exportDetailMarkdownArtifacts(jobs: any[], metadata: any, isAuto: boolean) {
-        const records: Array<{
-            index: number;
-            title: string;
-            jobUrl: string;
-            detailMarkdownFileName?: string;
-            downloadSuccess?: boolean;
-            downloadError?: string;
-        }> = [];
-
-        for (const [index, job] of jobs.entries()) {
-            const detail = job.detail as ZhilianDetailResult | undefined;
-            if (!detail || detail.status !== "success") continue;
-
-            const detailMarkdownFileName = buildDetailMarkdownFileName(job);
-            const response = await downloadTextFile(
-                detailMarkdownFileName,
-                createSingleDetailMarkdown(job, detail, metadata),
-                "text/markdown",
-                isAuto
-            );
-            job.detailMarkdownFileName = detailMarkdownFileName;
-            records.push({
-                index: index + 1,
-                title: job.title,
-                jobUrl: job.url,
-                detailMarkdownFileName,
-                downloadSuccess: Boolean(response?.success),
-                downloadError: response?.success ? undefined : response?.error || "Download failed"
-            });
-        }
-
-        return records;
-    }
-
-    async function collectDetailTestResults(jobs: any[], overlay?: HTMLElement): Promise<ZhilianDetailResult[]> {
-        const detailLimit = getDetailTestLimit();
-        const targetJobs = jobs.slice(0, detailLimit);
-        if (targetJobs.length === 0) return [];
-
-        if (overlay) {
-            overlay.innerText = `智联采集器 (${harvesterVersion})\n详情页测试：正在采集前 ${targetJobs.length} 条详情...`;
-        }
-
-        const response = await browser.runtime.sendMessage({
-            action: "zhilianCollectDetailTest",
-            jobs: targetJobs.map((job, index) => ({
-                index: index + 1,
-                title: job.title,
-                url: job.url
-            })),
-            debug: debugEnabled
-        }) as any;
-
-        if (!response?.success) {
-            const errorMessage = response?.error || "详情页采集失败";
-            debugLog("detail test failed", { error: errorMessage });
-            return targetJobs.map(job => ({
-                status: "failed",
-                jobUrl: job.url,
-                error: errorMessage
-            }));
-        }
-
-        if (!Array.isArray(response.details) || response.details.length === 0) {
-            debugLog("detail test empty", { targetCount: targetJobs.length });
-            return targetJobs.map(job => ({
-                status: "failed",
-                jobUrl: job.url,
-                requestedJobUrl: job.url,
-                error: "详情页后台返回空结果"
-            }));
-        }
-
-        return response.details;
-    }
-
-    function mergeDetailResults(jobs: any[], details: ZhilianDetailResult[]) {
-        const detailMap = new Map<string, ZhilianDetailResult>();
-        details.forEach(detail => {
-            [detail.jobUrl, detail.requestedJobUrl, detail.finalUrl]
-                .filter(Boolean)
-                .forEach(url => detailMap.set(normalizeZhilianJobIdentity(url as string), detail));
-        });
-        jobs.forEach(job => {
-            const detail = detailMap.get(normalizeZhilianJobIdentity(job.url));
-            if (detail) job.detail = detail;
-        });
-    }
-
-    function scanAndHarvest(overlay?: HTMLElement) {
+    async function scanAndHarvest(overlay?: HTMLElement) {
         const jobLinks = document.querySelectorAll("a[href*='/job_detail/'], a[href*='/jobdetail/']");
         jobLinks.forEach(link => {
             try {
@@ -1945,37 +1594,20 @@ declare global {
                 const title = cleanText(anchor.innerText);
                 if (harvestedJobs.has(fullUrl)) return;
                 if (title.length < 2) return;
-
                 const card = findJobCard(anchor);
-
                 if (card) {
                     const company = extractCompany(card, title);
                     const requirements = extractRequirements(card);
                     const companyMeta = extractCompanyMeta(card, company.company);
-                    const job = {
-                        title,
-                        url: fullUrl,
-                        salary: extractSalary(card),
-                        exp: requirements.exp,
-                        edu: requirements.edu,
-                        skills: extractSkillTags(card),
-                        company: company.company,
-                        companyUrl: company.companyUrl,
-                        companyBadges: company.companyBadges,
-                        area: extractArea(card),
-                        companyType: companyMeta.companyType,
-                        financingStage: companyMeta.financingStage,
-                        companySize: companyMeta.companySize,
-                        industry: companyMeta.industry,
+                    harvestedJobs.set(fullUrl, {
+                        title, url: fullUrl, salary: extractSalary(card), exp: requirements.exp, edu: requirements.edu,
+                        skills: extractSkillTags(card), company: company.company, companyUrl: company.companyUrl,
+                        companyBadges: company.companyBadges, area: extractArea(card),
+                        companyType: companyMeta.companyType, financingStage: companyMeta.financingStage,
+                        companySize: companyMeta.companySize, industry: companyMeta.industry,
                         raw: captureRawJobSnapshot(card, title)
-                    };
-                    debugLog("job parsed", job);
-
-                    harvestedJobs.set(fullUrl, job);
-
-                    if (overlay) {
-                        overlay.innerText = `智联采集器 (${harvesterVersion})\n已捕获：${harvestedJobs.size} 个岗位...`;
-                    }
+                    });
+                    if (overlay) overlay.innerText = `Joblens (${harvesterVersion})\n已捕获：${harvestedJobs.size} 个岗位...`;
                 }
             } catch (e) {}
         });
@@ -1985,707 +1617,125 @@ declare global {
         let lastHeight = document.body.scrollHeight;
         let sameHeightCount = 0;
         while (sameHeightCount < 4) {
-            if (harvest) scanAndHarvest(overlay);
+            if (harvest) await scanAndHarvest(overlay);
             window.scrollBy(0, 1500);
             window.dispatchEvent(new Event('scroll'));
             window.dispatchEvent(new Event('resize'));
             await new Promise(r => setTimeout(r, 800));
             const currentHeight = document.body.scrollHeight;
-            if (currentHeight === lastHeight) {
-                sameHeightCount++;
-            } else {
-                sameHeightCount = 0;
-                lastHeight = currentHeight;
-            }
-            if ((window.innerHeight + window.scrollY) >= document.body.offsetHeight - 200) {
-                await new Promise(r => setTimeout(r, 1500));
-            }
+            if (currentHeight === lastHeight) sameHeightCount++;
+            else { sameHeightCount = 0; lastHeight = currentHeight; }
+            if ((window.innerHeight + window.scrollY) >= document.body.offsetHeight - 200) await new Promise(r => setTimeout(r, 1500));
         }
-        if (harvest) scanAndHarvest(overlay);
+        if (harvest) await scanAndHarvest(overlay);
         window.scrollTo(0, 0);
-    }
-
-    function isVisibleKeywordElement(element: Element | null): element is HTMLElement {
-        if (!(element instanceof HTMLElement)) return false;
-        const style = window.getComputedStyle(element);
-        if (style.display === "none" || style.visibility === "hidden" || Number(style.opacity) === 0) return false;
-        const rect = element.getBoundingClientRect();
-        return rect.width > 0 && rect.height > 0;
     }
 
     function getCategoryTitle(item: HTMLElement): string {
         const titleEl = item.querySelector("[class*='job-menu__name'], [class*='menu__name'], [class*='title']") as HTMLElement | null;
         const title = cleanText(titleEl?.innerText || titleEl?.textContent);
-        if (title && title.length <= 20) return title.replace(/[>›]+$/, "").trim();
-
-        const firstLine = cleanText(item.innerText)
-            .split(" ")
-            .find(line => line && line.length <= 20);
-        return (firstLine || "").replace(/[>›]+$/, "").trim();
-    }
-
-    function findKeywordCategoryItems(): HTMLElement[] {
-        const items = Array.from(document.querySelectorAll(".job-menu__item, [class*='job-menu__item']")) as HTMLElement[];
-        const seen = new Set<string>();
-        return items.filter(item => {
-            if (!isVisibleKeywordElement(item)) return false;
-            const title = getCategoryTitle(item);
-            if (!title || seen.has(title)) return false;
-            seen.add(title);
-            return true;
-        });
-    }
-
-    function dispatchHoverEvents(element: HTMLElement) {
-        ["mouseenter", "mouseover", "mousemove"].forEach(type => {
-            element.dispatchEvent(new MouseEvent(type, {
-                bubbles: true,
-                cancelable: true,
-                view: window
-            }));
-        });
-    }
-
-    function findVisibleKeywordPanel(categoryItem: HTMLElement): HTMLElement | null {
-        const scopedPanel = Array.from(categoryItem.querySelectorAll(".job-menu__sub, [class*='job-menu__sub']"))
-            .find(isVisibleKeywordElement);
-        if (scopedPanel) return scopedPanel;
-
-        return Array.from(document.querySelectorAll(".job-menu__sub, [class*='job-menu__sub']"))
-            .filter(isVisibleKeywordElement)
-            .sort((a, b) => b.querySelectorAll("[class*='job-menu__sub__name__text']").length - a.querySelectorAll("[class*='job-menu__sub__name__text']").length)[0] || null;
-    }
-
-    function isKeywordGroupTitleElement(element: Element): element is HTMLElement {
-        return element instanceof HTMLElement
-            && element.matches(".job-menu__sub__title, [class*='job-menu__sub__title']");
-    }
-
-    function isKeywordValueElement(element: Element): element is HTMLElement {
-        return element instanceof HTMLElement
-            && element.matches(".job-menu__sub__name__text, [class*='job-menu__sub__name__text']");
-    }
-
-    function extractKeywordGroupsFromPanel(category: string, panel: HTMLElement): KeywordGroup[] {
-        const stream = Array.from(panel.querySelectorAll(
-            ".job-menu__sub__title, [class*='job-menu__sub__title'], .job-menu__sub__name__text, [class*='job-menu__sub__name__text']"
-        ));
-        const groupedKeywords = new Map<string, string[]>();
-        let currentGroup = "";
-
-        stream.forEach(node => {
-            if (isKeywordGroupTitleElement(node)) {
-                currentGroup = cleanText(node.innerText || node.textContent);
-                if (currentGroup && !groupedKeywords.has(currentGroup)) {
-                    groupedKeywords.set(currentGroup, []);
-                }
-                return;
-            }
-
-            if (!currentGroup || !isKeywordValueElement(node)) return;
-            const keyword = cleanText(node.innerText || node.textContent);
-            if (!keyword || keyword.length > 30) return;
-
-            const keywords = groupedKeywords.get(currentGroup);
-            if (!keywords || keywords.includes(keyword)) return;
-            keywords.push(keyword);
-        });
-
-        const groups = Array.from(groupedKeywords.entries())
-            .map(([group, keywords]) => ({
-                category,
-                group,
-                keywords
-            }))
-            .filter(group => group.group && group.keywords.length > 0);
-
-        if (groups.length > 0) return groups;
-
-        const fallbackKeywords = Array.from(panel.querySelectorAll(".job-menu__sub__name__text, [class*='job-menu__sub__name__text']"))
-            .map(el => cleanText((el as HTMLElement).innerText || el.textContent))
-            .filter(value => value && value.length <= 30);
-        return fallbackKeywords.length
-            ? [{ category, group: "未分组", keywords: Array.from(new Set(fallbackKeywords)) }]
-            : [];
-    }
-
-    function mergeKeywordGroups(groups: KeywordGroup[]): KeywordGroup[] {
-        const merged = new Map<string, KeywordGroup>();
-        groups.forEach(group => {
-            const key = `${group.category}::${group.group}`;
-            const existing = merged.get(key);
-            if (existing) {
-                existing.keywords = Array.from(new Set([...existing.keywords, ...group.keywords]));
-            } else {
-                merged.set(key, {
-                    category: group.category,
-                    group: group.group,
-                    keywords: Array.from(new Set(group.keywords))
-                });
-            }
-        });
-        return Array.from(merged.values());
+        return (title || "").replace(/[>›]+$/, "").trim();
     }
 
     async function discoverZhilianKeywords(overlay?: HTMLElement): Promise<KeywordGroup[]> {
         await new Promise(r => setTimeout(r, 1500));
-        const categoryItems = findKeywordCategoryItems();
+        const categoryItems = Array.from(document.querySelectorAll(".job-menu__item, [class*='job-menu__item']")).filter(item => item instanceof HTMLElement) as HTMLElement[];
         const allGroups: KeywordGroup[] = [];
-
         for (const item of categoryItems) {
             const category = getCategoryTitle(item);
             if (!category) continue;
-            if (overlay) {
-                overlay.innerText = `智联关键词发现器 (${harvesterVersion})\n正在展开：${category}\n已发现分组：${allGroups.length}`;
-            }
-
-            try {
-                item.scrollIntoView({ block: "center", inline: "nearest" });
-                dispatchHoverEvents(item);
-                await new Promise(r => setTimeout(r, 700));
-                const panel = findVisibleKeywordPanel(item);
-                if (!panel) {
-                    debugLog("keyword panel missing", { category });
-                    continue;
-                }
-                const groups = extractKeywordGroupsFromPanel(category, panel);
-                debugLog("keyword category parsed", { category, groupCount: groups.length, groups });
-                allGroups.push(...groups);
-            } catch (e) {
-                debugLog("keyword category failed", { category, error: e instanceof Error ? e.message : String(e) });
+            if (overlay) overlay.innerText = `Joblens (${harvesterVersion})\n正在展开：${category}\n已发现分组：${allGroups.length}`;
+            item.scrollIntoView({ block: "center", inline: "nearest" });
+            ["mouseenter", "mouseover", "mousemove"].forEach(type => item.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window })));
+            await new Promise(r => setTimeout(r, 700));
+            const panel = document.querySelector(".job-menu__sub, [class*='job-menu__sub']") as HTMLElement | null;
+            if (panel) {
+                const groupedKeywords = new Map<string, string[]>();
+                let currentGroup = "";
+                panel.querySelectorAll(".job-menu__sub__title, [class*='job-menu__sub__title'], .job-menu__sub__name__text, [class*='job-menu__sub__name__text']").forEach(node => {
+                    const text = cleanText((node as HTMLElement).innerText);
+                    if ((node as HTMLElement).matches(".job-menu__sub__title, [class*='job-menu__sub__title']")) currentGroup = text;
+                    else if (currentGroup && text) {
+                        const keywords = groupedKeywords.get(currentGroup) || [];
+                        if (!keywords.includes(text)) { keywords.push(text); groupedKeywords.set(currentGroup, keywords); }
+                    }
+                });
+                allGroups.push(...Array.from(groupedKeywords.entries()).map(([group, keywords]) => ({ category, group, keywords })));
             }
         }
-
-        return mergeKeywordGroups(allGroups);
+        return allGroups;
     }
 
     async function exportKeywordDiscoveryResult(groups: KeywordGroup[], overlay?: HTMLElement) {
-        const totalKeywords = Array.from(new Set(groups.flatMap(group => group.keywords))).length;
-        const categories = Array.from(new Set(groups.map(group => group.category)));
         const now = new Date();
-        const timestamp = now.getFullYear().toString() +
-            (now.getMonth() + 1).toString().padStart(2, '0') +
-            now.getDate().toString().padStart(2, '0') + '_' +
-            now.getHours().toString().padStart(2, '0') +
-            now.getMinutes().toString().padStart(2, '0') +
-            now.getSeconds().toString().padStart(2, '0');
+        const timestamp = now.getFullYear().toString() + (now.getMonth() + 1).toString().padStart(2, '0') + now.getDate().toString().padStart(2, '0') + '_' + now.getHours().toString().padStart(2, '0') + now.getMinutes().toString().padStart(2, '0') + now.getSeconds().toString().padStart(2, '0');
         const fileName = `zhilian_keyword_discovery_${timestamp}.md`;
-
-        let content = `# 智联岗位关键词池：${getTargetCityName()}\n\n`;
-        content += `- 来源：智联招聘首页职位分类\n`;
-        content += `- 状态：${groups.length > 0 ? "✅ 关键词发现成功" : "⚠️ 未发现关键词"}\n`;
-        content += `- 一级分类数：${categories.length}\n`;
-        content += `- 二级分组数：${groups.length}\n`;
-        content += `- 去重岗位词数：${totalKeywords}\n`;
-        content += `- 采集URL：${window.location.href}\n`;
-        content += `- 时间：${new Date().toLocaleString()}\n\n`;
-
-        categories.forEach(category => {
-            content += `## ${category}\n\n`;
-            groups.filter(group => group.category === category).forEach(group => {
-                content += `### ${group.group}\n`;
-                group.keywords.forEach(keyword => {
-                    content += `- ${keyword}\n`;
-                });
-                content += "\n";
+        let content = `# 智联岗位关键词池：${getTargetCityName()}\n\n- 时间：${new Date().toLocaleString()}\n\n`;
+        const categories = Array.from(new Set(groups.map(g => g.category)));
+        categories.forEach(c => {
+            content += `## ${c}\n\n`;
+            groups.filter(g => g.category === c).forEach(g => {
+                content += `### ${g.group}\n${g.keywords.map(k => `- ${k}`).join("\n")}\n\n`;
             });
         });
-
-        const blob = new Blob([content], { type: 'text/markdown' });
-        const reader = new FileReader();
-        await new Promise<void>(resolve => {
-            reader.onload = async function() {
-                const dataUrl = reader.result as string;
-                try {
-                    const response = await browser.runtime.sendMessage({
-                        action: "finalDownloadOnly",
-                        dataUrl,
-                        fileName,
-                        isAuto: true
-                    }) as any;
-                    if (response?.success && overlay) {
-                        overlay.style.background = "green";
-                        overlay.innerText = `✅ 关键词发现完成\n一级分类：${categories.length}\n岗位词：${totalKeywords}`;
-                    }
-                } catch (e) {
-                    if (overlay) {
-                        overlay.style.background = "#9a3412";
-                        overlay.innerText = `关键词文件下载失败：${e instanceof Error ? e.message : String(e)}`;
-                    }
-                }
-                resolve();
-            };
-            reader.readAsDataURL(blob);
-        });
+        await downloadTextFile(fileName, content, 'text/markdown', true);
+        if (overlay) { overlay.style.background = "green"; overlay.innerText = "✅ 关键词发现完成"; }
     }
 
     async function triggerFinalSave(isAuto: boolean, overlay?: HTMLElement) {
-        return new Promise<void>(async (resolve) => {
-            scanAndHarvest(overlay);
-            const harvestSession = await readHarvestSession();
-            const batchSession = await readKeywordBatchSession();
-            const isBatchMode = Boolean(batchSession?.active && batchSession.keywords?.length);
-            const keyword = getKeywordFromPage();
-            const now = new Date();
-            const timestamp = now.getFullYear().toString() +
-                (now.getMonth() + 1).toString().padStart(2, '0') +
-                now.getDate().toString().padStart(2, '0') + '_' +
-                now.getHours().toString().padStart(2, '0') +
-                now.getMinutes().toString().padStart(2, '0') +
-                now.getSeconds().toString().padStart(2, '0');
-            const fileName = isHarvestTestMode()
-                ? `ZHILIAN_TEST_${keyword}_${timestamp}.md`
-                : `ZHILIAN_${keyword}_${timestamp}.md`;
-            const rawFileName = isHarvestTestMode()
-                ? `ZHILIAN_TEST_RAW_${keyword}_${timestamp}.json`
-                : `ZHILIAN_RAW_${keyword}_${timestamp}.json`;
-            const rawHtmlFileName = isHarvestTestMode()
-                ? `ZHILIAN_TEST_RAW_${keyword}_${timestamp}.html`
-                : `ZHILIAN_RAW_${keyword}_${timestamp}.html`;
-
-            let content = "";
-            if (harvestedJobs.size > 0) {
-                const jobs = Array.from(harvestedJobs.values());
-                let detailArtifactRecords: Awaited<ReturnType<typeof exportDetailHtmlArtifacts>> = [];
-                if (isDetailTestMode()) {
-                    const details = await collectDetailTestResults(jobs, overlay);
-                    mergeDetailResults(jobs, details);
-                    detailArtifactRecords = await exportDetailHtmlArtifacts(jobs, keyword, timestamp, isAuto);
-                }
-
-                const pageLimit = getClipperPageLimit();
-                const actualPages = harvestSession?.lastGrowthPage || getCurrentPageFromUrl();
-                const rawSnapshot = {
-                    metadata: {
-                        platform: "zhilian",
-                        keyword,
-                        url: window.location.href,
-                        collectedAt: now.toISOString(),
-                        mode: isHarvestTestMode() ? "test" : "structured",
-                        pageLimit,
-                        actualPages,
-                        count: harvestedJobs.size,
-                        detailTest: isDetailTestMode(),
-                        detailLimit: isDetailTestMode() ? getDetailTestLimit() : 0,
-                        harvesterVersion
-                    },
-                    jobs: jobs.map((job, index) => ({
-                        index: index + 1,
-                        jobUrl: job.url,
-                        companyUrl: job.companyUrl,
-                        rawAvailable: Boolean(job.raw),
-                        raw: job.raw || null,
-                        detailAvailable: Boolean(job.detail),
-                        detail: job.detail || null
-                    }))
-                };
-                if (isHarvestTestMode() || pageLimit <= 1) {
-                    await downloadTextFile(rawHtmlFileName, createRawCardsHtml(rawSnapshot), "text/html", isAuto);
-                    await downloadTextFile(rawFileName, JSON.stringify(rawSnapshot, null, 2), "application/json", isAuto);
-                } else {
-                    debugLog("raw snapshot skipped", {
-                        reason: "multi-page raw snapshots need page-wise artifact export to avoid browser storage quota pressure",
-                        rawFileName,
-                        rawHtmlFileName,
-                        count: harvestedJobs.size
-                    });
-                }
-
-                if (isDetailTestMode()) {
-                    const detailRawFileName = `ZHILIAN_DETAIL_TEST_RAW_${keyword}_${timestamp}.json`;
-                    const detailManifestFileName = `ZHILIAN_DETAIL_TEST_MANIFEST_${keyword}_${timestamp}.json`;
-                    const detailJobs = jobs.filter(job => job.detail);
-                    const detailMetadata = {
-                        platform: "zhilian",
-                        keyword,
-                        url: window.location.href,
-                        collectedAt: now.toISOString(),
-                        mode: "detail_test",
-                        listCount: jobs.length,
-                        detailCount: detailJobs.length,
-                        detailLimit: getDetailTestLimit(),
-                        detailHtmlFileCount: detailArtifactRecords.filter(record => record.detailHtmlFileName).length,
-                        harvesterVersion
-                    };
-                    const detailMarkdownRecords = await exportDetailMarkdownArtifacts(jobs, detailMetadata, isAuto);
-                    const detailSnapshot = {
-                        metadata: detailMetadata,
-                        jobs: jobs.map((job, index) => ({
-                            index: index + 1,
-                            title: job.title,
-                            jobUrl: job.url,
-                            company: job.company,
-                            companyUrl: job.companyUrl,
-                            detailMarkdownFileName: job.detailMarkdownFileName || null,
-                            detail: job.detail || null
-                        }))
-                    };
-                    const detailManifest = {
-                        metadata: {
-                            ...detailMetadata,
-                            listRawHtmlFileName: (isHarvestTestMode() || pageLimit <= 1) ? rawHtmlFileName : null,
-                            listRawJsonFileName: (isHarvestTestMode() || pageLimit <= 1) ? rawFileName : null,
-                            listMarkdownFileName: fileName,
-                            detailRawJsonFileName: detailRawFileName,
-                            detailMarkdownMode: "one_file_per_job"
-                        },
-                        jobs: jobs.map((job, index) => {
-                            const artifactRecord = detailArtifactRecords.find(record => record.index === index + 1);
-                            const markdownRecord = detailMarkdownRecords.find(record => record.index === index + 1);
-                            const detail = job.detail as ZhilianDetailResult | undefined;
-                            return {
-                                index: index + 1,
-                                title: job.title,
-                                company: job.company,
-                                jobUrl: job.url,
-                                companyUrl: job.companyUrl,
-                                detailStatus: detail?.status || "not_collected",
-                                parseSource: detail?.parseSource || null,
-                                detailHtmlFileName: artifactRecord?.detailHtmlFileName || detail?.raw?.detailHtmlFileName || null,
-                                detailHtmlDownloadSuccess: artifactRecord?.downloadSuccess ?? null,
-                                detailMarkdownFileName: markdownRecord?.detailMarkdownFileName || job.detailMarkdownFileName || null,
-                                detailMarkdownDownloadSuccess: markdownRecord?.downloadSuccess ?? null,
-                                error: detail?.error || artifactRecord?.downloadError || null
-                            };
-                        })
-                    };
-                    await downloadTextFile(detailRawFileName, JSON.stringify(detailSnapshot, null, 2), "application/json", isAuto);
-                    await downloadTextFile(detailManifestFileName, JSON.stringify(detailManifest, null, 2), "application/json", isAuto);
-                }
-
-                content = `# 智联岗位收割：${keyword}\n\n`;
-                content += `- 来源：智联招聘\n- 状态：✅ 结构化收割成功\n- 数量：${harvestedJobs.size}\n`;
-                if (isHarvestTestMode()) {
-                    content += `- 采集模式：测试模式（仅当前列表页）\n`;
-                }
-                if (isDetailTestMode()) {
-                    content += `- 详情测试：已采集前 ${jobs.filter(job => job.detail).length}/${getDetailTestLimit()} 条\n`;
-                }
-                if (pageLimit > 1) {
-                    content += `- 翻页模式：${isAutoPagingMode() ? "自动翻页" : "限定页数"}\n`;
-                    content += `- 实际采集页数：${actualPages}\n`;
-                    content += `- 页数上限：${pageLimit}\n`;
-                }
-                content += `- 采集URL：${window.location.href}\n`;
-                content += `- 时间：${new Date().toLocaleString()}\n\n## 岗位列表\n\n`;
-
-                let idx = 1;
-                jobs.forEach(r => {
-                    content += `### ${idx}. ${r.title}\n`;
-                    content += `- 公司：[${r.company}](${r.companyUrl})\n`;
-                    content += `- 薪资：**${r.salary}**\n`;
-                    content += `- 地点：${r.area}\n`;
-                    content += `- 经验：${r.exp || "未知"}\n`;
-                    content += `- 学历：${r.edu || "未知"}\n`;
-                    content += `- 岗位标签：${r.skills?.length ? r.skills.join("、") : "未知"}\n`;
-                    content += `- 公司标签：${r.companyBadges?.length ? r.companyBadges.join("、") : "未知"}\n`;
-                    content += `- 公司性质：${r.companyType || "未知"}\n`;
-                    content += `- 融资阶段：${r.financingStage || "未知"}\n`;
-                    content += `- 公司规模：${r.companySize || "未知"}\n`;
-                    content += `- 行业：${r.industry || "未知"}\n`;
-                    if (r.detail) {
-                        content += `- 详情采集：${r.detail.status}${r.detail.workAddress ? `，详情地址：${r.detail.workAddress}` : ""}\n`;
-                    }
-                    content += `- 链接：[查看详情](${r.url})\n\n`;
-                    idx++;
-                });
-            } else {
-                content = "# 收割失败：未发现符合条件的岗位卡片\n\n请检查页面 DOM 结构或 Selector 兼容性。";
-            }
-
-            const response = await downloadTextFile(fileName, content, "text/markdown", isAuto);
-            const isQueueMode = isAuto && !isBatchMode && isListQueueMode();
-
-            if (response?.success && isAuto && overlay) {
-                    const completedCount = harvestedJobs.size;
-                    overlay.style.background = "green";
-                    overlay.innerText = isBatchMode
-                        ? `✅ 当前关键词完成\n${keyword}\n成功收割 ${completedCount} 个情报原子。`
-                        : `✅ 完成！成功收割 ${completedCount} 个情报原子。`;
-                    if (!isBatchMode && !isQueueMode) {
-                        if (window.opener) {
-                            setTimeout(() => { window.close(); }, 2000);
-                        } else {
-                            overlay.innerText += "\n当前标签页不是脚本打开的，请手动关闭。";
-                        }
-                    }
-            }
-
-            if (isQueueMode) {
-                try {
-                    await browser.runtime.sendMessage({
-                        action: "zhilianListHarvestDone",
-                        success: Boolean(response?.success),
-                        keyword,
-                        fileName,
-                        error: response?.success ? undefined : (response?.error || "download failed")
-                    });
-                } catch (e) {}
-                try {
-                    await browser.runtime.sendMessage({ action: "closeCurrentTab" });
-                } catch {
-                    try { window.close(); } catch {}
-                }
-            }
-            resolve();
+        await scanAndHarvest(overlay);
+        const keyword = getKeywordFromPage();
+        const now = new Date();
+        const timestamp = now.getFullYear().toString() + (now.getMonth() + 1).toString().padStart(2, '0') + now.getDate().toString().padStart(2, '0') + '_' + now.getHours().toString().padStart(2, '0') + now.getMinutes().toString().padStart(2, '0') + now.getSeconds().toString().padStart(2, '0');
+        const fileName = isHarvestTestMode() ? `ZHILIAN_TEST_${keyword}_${timestamp}.md` : `ZHILIAN_${keyword}_${timestamp}.md`;
+        const jobs = Array.from(harvestedJobs.values());
+        let content = `# 智联岗位收割：${keyword}\n\n- 数量：${jobs.length}\n- 时间：${new Date().toLocaleString()}\n\n## 岗位列表\n\n`;
+        jobs.forEach((r, idx) => {
+            content += `### ${idx + 1}. ${r.title}\n- 公司：[${r.company}](${r.companyUrl})\n- 薪资：**${r.salary}**\n- 地点：${r.area}\n- 链接：[查看详情](${r.url})\n\n`;
         });
+        const response = await downloadTextFile(fileName, content, "text/markdown", isAuto);
+        if (response?.success && isAuto && overlay) { overlay.style.background = "green"; overlay.innerText = "✅ 采集完成"; }
+        if (isAuto && isListQueueMode()) {
+            await chrome.runtime.sendMessage({ action: "zhilianListHarvestDone", success: Boolean(response?.success), keyword, fileName });
+            await chrome.runtime.sendMessage({ action: "closeCurrentTab" });
+        }
     }
 
+    // Main entry point logic...
     if (isKeywordDiscoveryMode() && isZhilianPage) {
         const overlay = document.createElement('div');
-        overlay.style.cssText = 'position:fixed;top:10px;right:10px;background:#2563eb;color:white;padding:20px;z-index:999999;font-weight:bold;border-radius:10px;box-shadow:0 0 20px rgba(0,0,0,0.5);white-space:pre-line;';
-        overlay.innerText = `智联关键词发现器启动 (${harvesterVersion})...`;
+        overlay.style.cssText = 'position:fixed;top:10px;right:10px;background:#2563eb;color:white;padding:20px;z-index:999999;font-weight:bold;border-radius:10px;';
         document.body.appendChild(overlay);
-
         setTimeout(async () => {
-            try {
-                const groups = await discoverZhilianKeywords(overlay);
-                debugLog("keyword discovery completed", {
-                    categoryCount: Array.from(new Set(groups.map(group => group.category))).length,
-                    groupCount: groups.length,
-                    keywordCount: Array.from(new Set(groups.flatMap(group => group.keywords))).length
-                });
-                overlay.innerText = `智联关键词发现器 (${harvesterVersion})\n正在导出关键词池...`;
-                await exportKeywordDiscoveryResult(groups, overlay);
-            } catch (e) {
-                console.error("[Zhilian Harvester] keyword discovery failed", e);
-                overlay.style.background = "#9a3412";
-                overlay.innerText = `关键词发现失败：${e instanceof Error ? e.message : String(e)}`;
-            }
+            const groups = await discoverZhilianKeywords(overlay);
+            await exportKeywordDiscoveryResult(groups, overlay);
         }, 2500);
-    }
-
-    if (isDetailQueueWakeMode() && isZhilianPage) {
-        const overlay = document.createElement('div');
-        overlay.style.cssText = 'position:fixed;top:10px;right:10px;background:#2563eb;color:white;padding:20px;z-index:999999;font-weight:bold;border-radius:10px;box-shadow:0 0 20px rgba(0,0,0,0.5);white-space:pre-line;';
-        overlay.innerText = `智联详情队列唤醒 (${harvesterVersion})...`;
-        document.body.appendChild(overlay);
-
-        setTimeout(async () => {
-            try {
-                const response = await browser.runtime.sendMessage({ action: "runDetailTaskQueue" }) as any;
-                if (response?.success) {
-                    overlay.style.background = "green";
-                    overlay.innerText = "智联详情队列已唤醒";
-                    setTimeout(() => {
-                        browser.runtime.sendMessage({ action: "closeCurrentTab" }).catch(() => {
-                            window.close();
-                        });
-                    }, 1200);
-                } else {
-                    overlay.style.background = "#9a3412";
-                    overlay.innerText = `详情队列唤醒失败：${response?.error || "未知错误"}`;
-                }
-            } catch (e) {
-                overlay.style.background = "#9a3412";
-                overlay.innerText = `详情队列唤醒失败：${e instanceof Error ? e.message : String(e)}`;
-            }
-        }, 800);
-    }
-
-    if (isListQueueWakeMode() && isZhilianPage) {
-        const overlay = document.createElement('div');
-        overlay.style.cssText = 'position:fixed;top:10px;right:10px;background:#2563eb;color:white;padding:20px;z-index:999999;font-weight:bold;border-radius:10px;box-shadow:0 0 20px rgba(0,0,0,0.5);white-space:pre-line;';
-        overlay.innerText = `智联列表队列唤醒 (${harvesterVersion})...`;
-        document.body.appendChild(overlay);
-
-        setTimeout(async () => {
-            try {
-                const response = await browser.runtime.sendMessage({ action: "runListTaskQueue" }) as any;
-                if (response?.success) {
-                    overlay.style.background = "green";
-                    overlay.innerText = "智联列表队列已唤醒";
-                    setTimeout(() => {
-                        browser.runtime.sendMessage({ action: "closeCurrentTab" }).catch(() => {
-                            window.close();
-                        });
-                    }, 1200);
-                } else {
-                    overlay.style.background = "#9a3412";
-                    overlay.innerText = `列表队列唤醒失败：${response?.error || "未知错误"}`;
-                }
-            } catch (e) {
-                overlay.style.background = "#9a3412";
-                overlay.innerText = `列表队列唤醒失败：${e instanceof Error ? e.message : String(e)}`;
-            }
-        }, 800);
     }
 
     if (isDirectJobDetailMode() && isZhilianPage) {
         const overlay = document.createElement('div');
-        overlay.style.cssText = 'position:fixed;top:10px;right:10px;background:#7c3aed;color:white;padding:20px;z-index:999999;font-weight:bold;border-radius:10px;box-shadow:0 0 20px rgba(0,0,0,0.5);white-space:pre-line;';
-        overlay.innerText = `智联详情采集器启动 (${harvesterVersion})...`;
+        overlay.style.cssText = 'position:fixed;top:10px;right:10px;background:#7c3aed;color:white;padding:20px;z-index:999999;font-weight:bold;border-radius:10px;';
         document.body.appendChild(overlay);
-
-        setTimeout(async () => {
-            try {
-                overlay.innerText = `智联详情采集器 (${harvesterVersion})\n正在解析详情页...`;
-                await exportDirectJobDetailResult(overlay);
-            } catch (e) {
-                console.error("[Zhilian Harvester] job detail collection failed", e);
-                overlay.style.background = "#9a3412";
-                overlay.innerText = `详情采集失败：${e instanceof Error ? e.message : String(e)}`;
-            }
-        }, 1800);
+        setTimeout(() => exportDirectJobDetailResult(overlay), 1800);
     }
 
-    const isAuto = window.location.href.includes('clipper_auto=1') && !isKeywordDiscoveryMode() && !isDirectJobDetailMode();
+    const isAuto = window.location.href.includes('joblens_auto=1') && !isKeywordDiscoveryMode() && !isDirectJobDetailMode();
     if (isAuto) {
         const overlay = document.createElement('div');
-        overlay.style.cssText = 'position:fixed;top:10px;right:10px;background:red;color:white;padding:20px;z-index:999999;font-weight:bold;border-radius:10px;box-shadow:0 0 20px rgba(0,0,0,0.5);white-space:pre-line;';
-        overlay.innerText = `智联采集器启动 (${harvesterVersion})...`;
+        overlay.style.cssText = 'position:fixed;top:10px;right:10px;background:red;color:white;padding:20px;z-index:999999;font-weight:bold;border-radius:10px;';
         document.body.appendChild(overlay);
-
-        (async () => {
-            if (isKeywordBatchMode()) {
-                const batchRedirectUrl = await ensureKeywordBatchSession(overlay);
-                if (batchRedirectUrl) {
-                    debugLog("batch route", { from: window.location.href, to: batchRedirectUrl });
-                    await clearHarvestSession();
-                    window.location.replace(batchRedirectUrl);
-                    return;
-                }
-            }
-
-            if (shouldNormalizeZhilianSearchUrl()) {
-                const normalizedUrl = normalizeZhilianSearchUrl();
-                debugLog("normalize city url", { from: window.location.href, to: normalizedUrl });
-                overlay.innerText = `智联采集器 (${harvesterVersion})\n正在切换到上海路径 jl=${getTargetCityId()}...`;
-                await clearHarvestSession();
-                window.location.replace(normalizedUrl);
-                return;
-            }
-
-            setTimeout(async () => {
-                const pageLimit = getClipperPageLimit();
-                const existingSession = await readHarvestSession();
-                const searchKey = getHarvestSearchKey();
-                const canRestoreSession = existingSession?.active
-                    && existingSession.pageLimit === pageLimit
-                    && existingSession.searchKey === searchKey;
-                const currentPage = canRestoreSession
-                    ? Number(existingSession.currentPage || getCurrentPageFromUrl())
-                    : getCurrentPageFromUrl();
-                const lastGrowthPage = Number(existingSession?.lastGrowthPage || currentPage);
-                const existingPageStats = Array.isArray(existingSession?.pageStats)
-                    ? existingSession.pageStats as HarvestPageStat[]
-                    : [];
-
-                if (pageLimit > 1 && canRestoreSession) {
-                    restoreHarvestSession(existingSession);
-                } else {
-                    if (pageLimit > 1 && currentPage > 1) {
-                        debugLog("session restore miss", {
-                            currentPage,
-                            pageLimit,
-                            expectedSearchKey: searchKey,
-                            existingSession: existingSession
-                                ? {
-                                    active: existingSession.active,
-                                    pageLimit: existingSession.pageLimit,
-                                    currentPage: existingSession.currentPage,
-                                    searchKey: existingSession.searchKey,
-                                    keyword: existingSession.keyword
-                                }
-                                : null
-                        });
-                    }
-                    harvestedJobs.clear();
-                    if (pageLimit > 1) {
-                        await saveHarvestSession(pageLimit, currentPage, currentPage, []);
-                    } else {
-                        await clearHarvestSession();
-                    }
-                }
-
-                if (isHarvestTestMode()) {
-                    overlay.innerText = `智联采集器 (${harvesterVersion})\n测试模式：仅采集当前列表页`;
-                }
-                if (pageLimit > 1) {
-                    const currentCount = harvestedJobs.size;
-                    overlay.innerText = `智联采集器 (${harvesterVersion})\n${isAutoPagingMode() ? "自动翻页" : "限定页数"}：第 ${currentPage}/${pageLimit} 页\n已累计：${currentCount} 个岗位`;
-                }
-                const countBeforeScroll = harvestedJobs.size;
-                await autoScroll(true, overlay);
-                const countAfterScroll = harvestedJobs.size;
-                const hasNewJobs = countAfterScroll > countBeforeScroll;
-                const addedThisPage = countAfterScroll - countBeforeScroll;
-                const nextLastGrowthPage = hasNewJobs ? currentPage : lastGrowthPage;
-                const nextPageStats = mergeHarvestPageStats(existingPageStats, {
-                        page: currentPage,
-                        added: addedThisPage,
-                        total: countAfterScroll,
-                        restored: canRestoreSession,
-                        mode: "structured",
-                        searchKey,
-                        url: window.location.href,
-                        updatedAt: new Date().toISOString()
-                    });
-
-                debugLog("page summary", {
-                    page: currentPage,
-                    pageLimit,
-                    addedThisPage,
-                    total: countAfterScroll,
-                    restored: canRestoreSession,
-                    mode: "structured",
-                    searchKey
-                });
-
-                if (pageLimit > 1 && isAutoPagingMode() && !hasNewJobs) {
-                    debugLog("auto paging stop", { currentPage, pageLimit, harvestedCount: countAfterScroll, reason: "no_new_jobs" });
-                    overlay.innerText = `智联采集器 (${harvesterVersion})\n自动翻页停止：第 ${currentPage} 页没有新增岗位\n正在打包情报原子...`;
-                    await saveHarvestSession(pageLimit, currentPage, nextLastGrowthPage, nextPageStats);
-                    await triggerFinalSave(true, overlay);
-                    await clearHarvestSession();
-                    if (await advanceKeywordBatch(overlay)) {
-                        return;
-                    }
-                    return;
-                }
-
-                if (pageLimit > 1 && currentPage < pageLimit) {
-                    await saveHarvestSession(pageLimit, currentPage + 1, nextLastGrowthPage, nextPageStats);
-                    const nextPageUrl = getNextPageUrl(currentPage + 1);
-                    debugLog("next page", { currentPage, pageLimit, nextPageUrl, harvestedCount: countAfterScroll });
-                    overlay.innerText = `智联采集器 (${harvesterVersion})\n第 ${currentPage}/${pageLimit} 页完成\n累计 ${countAfterScroll} 个岗位\n正在跳转下一页...`;
-                    window.location.href = nextPageUrl;
-                    return;
-                }
-
-                overlay.innerText = '💾 正在打包情报原子...';
-                if (pageLimit > 1) await saveHarvestSession(pageLimit, currentPage, nextLastGrowthPage, nextPageStats);
-                await triggerFinalSave(true, overlay);
-                await clearHarvestSession();
-                if (await advanceKeywordBatch(overlay)) {
-                    return;
-                }
-            }, 3000);
-        })().catch(error => {
-            console.error("[Zhilian Harvester] auto bootstrap failed", error);
-            overlay.style.background = "#9a3412";
-            overlay.innerText = `自动采集启动失败：${error instanceof Error ? error.message : String(error)}`;
-        });
+        setTimeout(async () => {
+            await autoScroll(true, overlay);
+            await triggerFinalSave(true, overlay);
+            const isBatch = isKeywordBatchMode();
+            if (isBatch) await advanceKeywordBatch(overlay);
+        }, 3000);
     }
 
-    browser.runtime.onMessage.addListener((request: any, sender, sendResponse) => {
-        if (window.obsidianClipperGeneration !== myGeneration) return;
+    chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
+        if (window.joblensGeneration !== myGeneration) return;
         if (request.action === "ping") { sendResponse({ success: true }); return true; }
-        if (request.action === "parseZhilianDetail") {
-            sendResponse(parseZhilianDetailPage());
-            return true;
-        }
-        if (request.action === "auto-scroll-and-save") {
-            sendResponse({ success: true, status: "harvest_started" });
-            (async () => {
-                try {
-                    harvestedJobs.clear();
-                    await autoScroll(true);
-                    await triggerFinalSave(false);
-                } catch (e) { console.error(e); }
-            })();
-            return true;
-        }
+        if (request.action === "parseZhilianDetail") { sendResponse(parseZhilianDetailPage()); return true; }
         return true;
     });
 })();

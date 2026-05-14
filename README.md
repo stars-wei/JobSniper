@@ -159,7 +159,7 @@ jobsniper://vault/positions/zhilian/产品/互联网产品经理/AI产品经理/
 行为：
 
 - 打开智联首页
-- 附加 `clipper_keyword_discovery=1`
+- 附加 `joblens_keyword_discovery=1`
 - 由 Joblens 扩展导出关键词发现 Markdown
 
 产物命名：
@@ -307,7 +307,7 @@ scraping_layer/joblens
 ```bash
 cd /home/xstars/programs/JobSniper/scraping_layer/joblens
 npm install
-npm run build:chrome
+npm run build
 ```
 
 构建后需要在 Chrome 扩展管理页重新加载扩展，新的后台队列逻辑才会生效。
@@ -368,7 +368,7 @@ Joblens build：
 
 ```bash
 cd /home/xstars/programs/JobSniper/scraping_layer/joblens
-npm run build:chrome
+npm run build
 ```
 
 Git hygiene：

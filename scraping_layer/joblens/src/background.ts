@@ -1,119 +1,79 @@
-import browser from 'webextension-polyfill';
-import { detectBrowser } from './utils/browser-detection';
-import { updateCurrentActiveTab, isValidUrl, isBlankPage, isNormalPageUrl } from './utils/active-tab-manager';
-import { TextHighlightData } from './utils/highlighter';
-import { debounce } from './utils/debounce';
-import { Settings } from './types/types';
+/**
+ * Joblens - Background Service Worker
+ *
+ * Handles the background queue for recruitment data harvesting.
+ * Communicates with the local filesystem via JSONL task/result files in the Downloads directory.
+ */
 
+const DETAIL_TASK_FILE = 'file:///D:/Downloads/zhilian_detail_tasks.jsonl';
+const DETAIL_RESULTS_FILE = 'zhilian_detail_results.jsonl';
+const DETAIL_DONE_LOCKS_KEY = 'joblens_detail_done_locks_v1';
+const DETAIL_INFLIGHT_LOCKS_KEY = 'joblens_detail_inflight_locks_v1';
+const DETAIL_INFLIGHT_TTL_MS = 10 * 60 * 1000;
+const DETAIL_QUEUE_PAUSED_KEY = 'joblens_detail_queue_paused_v1';
 
-const YOUTUBE_EMBED_RULE_ID = 9001;
-const YOUTUBE_INNERTUBE_RULE_ID = 9002;
+const LIST_TASK_FILE = 'file:///D:/Downloads/zhilian_list_tasks.jsonl';
+const LIST_RESULTS_FILE = 'zhilian_list_results.jsonl';
+const LIST_DONE_LOCKS_KEY = 'joblens_list_done_locks_v1';
+const LIST_INFLIGHT_LOCKS_KEY = 'joblens_list_inflight_locks_v1';
+const LIST_INFLIGHT_TTL_MS = 30 * 60 * 1000;
 
-// Chrome: declarativeNetRequest to rewrite Referer on YouTube embeds.
-// Safari/Firefox use the native video element instead (see reader.ts).
-async function enableYouTubeEmbedRule(tabId: number): Promise<void> {
-	await chrome.declarativeNetRequest.updateSessionRules({
-		removeRuleIds: [YOUTUBE_EMBED_RULE_ID],
-		addRules: [{
-			id: YOUTUBE_EMBED_RULE_ID,
-			priority: 1,
-			action: {
-				type: 'modifyHeaders' as any,
-				requestHeaders: [{
-					header: 'Referer',
-					operation: 'set' as any,
-					value: 'https://obsidian.md/'
-				}]
-			},
-			condition: {
-				urlFilter: '||youtube.com/embed/',
-				resourceTypes: ['sub_frame' as any],
-				tabIds: [tabId]
-			}
-		}]
-	});
+type DetailTask = {
+	index: number;
+	url: string;
+	keyword?: string;
+	jobId?: string;
+};
+
+type ListTask = {
+	index: number;
+	url: string;
+	keyword?: string;
+	taskId?: string;
+};
+
+type QueuePauseState = {
+	paused: boolean;
+	reason?: string;
+	paused_at?: string;
+	tab_id?: number;
+};
+
+type DetailProcessResult = {
+	success: boolean;
+	reason?: string;
+};
+
+type ListProcessResult = {
+	success: boolean;
+	reason?: string;
+	fileName?: string;
+};
+
+type RuntimeRequest = {
+	action?: string;
+	tabId?: number;
+	dataUrl?: string;
+	content?: string;
+	mimeType?: string;
+	fileName?: string;
+	jobs?: Array<{ index: number; title: string; url: string }>;
+	debug?: boolean;
+	success?: boolean;
+	error?: string;
+};
+
+let isDetailQueueRunning = false;
+let isListQueueRunning = false;
+
+const detailRuntimeClaims = new Set<string>();
+const listRuntimeClaims = new Set<string>();
+const captchaResolvers = new Map<number, (result: DetailProcessResult) => void>();
+const listHarvestResolvers = new Map<number, (result: ListProcessResult) => void>();
+
+function sleep(ms: number): Promise<void> {
+	return new Promise(resolve => setTimeout(resolve, ms));
 }
-
-async function disableYouTubeEmbedRule(): Promise<void> {
-	await chrome.declarativeNetRequest.updateSessionRules({
-		removeRuleIds: [YOUTUBE_EMBED_RULE_ID]
-	});
-}
-
-// Set Origin header on YouTube innertube API requests from the extension.
-// YouTube doesn't accept chrome-extension://...
-async function enableYouTubeInnertubeRule(): Promise<void> {
-	const dnr = (typeof chrome !== 'undefined' && chrome.declarativeNetRequest)
-		|| (typeof browser !== 'undefined' && (browser as any).declarativeNetRequest);
-	if (!dnr) return;
-	try {
-		await dnr.updateSessionRules({
-			removeRuleIds: [YOUTUBE_INNERTUBE_RULE_ID],
-			addRules: [{
-				id: YOUTUBE_INNERTUBE_RULE_ID,
-				priority: 1,
-				action: {
-					type: 'modifyHeaders' as any,
-					requestHeaders: [
-						{ header: 'Origin', operation: 'set' as any, value: 'https://www.youtube.com' },
-						{ header: 'Referer', operation: 'set' as any, value: 'https://www.youtube.com/' },
-					]
-				},
-				condition: {
-					urlFilter: '||youtube.com/youtubei/',
-					resourceTypes: ['xmlhttprequest' as any],
-					initiatorDomains: [chrome?.runtime?.id || ''].filter(Boolean),
-				}
-			}]
-		});
-	} catch { /* Firefox/Safari use webRequest or native messaging instead */ }
-}
-
-// Firefox/Safari: use webRequest.onBeforeSendHeaders to set Origin/Referer on
-// YouTube innertube requests. Fallback for browsers where declarativeNetRequest
-// doesn't work or isn't supported.
-if (typeof browser !== 'undefined' && browser.webRequest?.onBeforeSendHeaders) {
-	try {
-		browser.webRequest.onBeforeSendHeaders.addListener(
-			(details) => {
-				// Only modify requests from tabs showing extension pages
-				if (details.tabId && details.tabId > 0) {
-					// Check asynchronously would be complex — instead check
-					// if the request has an extension origin or referer
-					const refHeader = details.requestHeaders?.find(h => h.name.toLowerCase() === 'referer');
-					const refValue = refHeader?.value || '';
-					const originHeader = details.requestHeaders?.find(h => h.name.toLowerCase() === 'origin');
-					const originValue = originHeader?.value || '';
-					const isFromExtension = refValue.startsWith('moz-extension://') || originValue.startsWith('moz-extension://')
-						|| refValue.startsWith('safari-web-extension://') || originValue.startsWith('safari-web-extension://');
-					if (!isFromExtension) return { requestHeaders: details.requestHeaders };
-				}
-
-				const headers = details.requestHeaders || [];
-				const setHeader = (name: string, value: string) => {
-					const existing = headers.find(h => h.name.toLowerCase() === name.toLowerCase());
-					if (existing) {
-						existing.value = value;
-					} else {
-						headers.push({ name, value });
-					}
-				};
-				setHeader('Origin', 'https://www.youtube.com');
-				setHeader('Referer', 'https://www.youtube.com/');
-				return { requestHeaders: headers };
-			},
-			{ urls: ['*://www.youtube.com/*'] },
-			['blocking', 'requestHeaders']
-		);
-	} catch { /* webRequest not available */ }
-}
-
-let sidePanelOpenWindows: Set<number> = new Set();
-let highlighterModeState: { [tabId: number]: boolean } = {};
-let readerModeState: { [tabId: number]: boolean } = {};
-let hasHighlights = false;
-let isContextMenuCreating = false;
-let popupPorts: { [tabId: number]: browser.Runtime.Port } = {};
 
 function sanitizeDownloadFileName(fileName: string): string {
 	const sanitized = fileName
@@ -123,138 +83,10 @@ function sanitizeDownloadFileName(fileName: string): string {
 	return sanitized || 'job_export.md';
 }
 
-async function injectContentScript(tabId: number): Promise<void> {
-	if (browser.scripting) {
-		console.log('[Obsidian Clipper] Using scripting API');
-		await browser.scripting.executeScript({
-			target: { tabId },
-			files: ['content.js']
-		});
-	} else {
-		console.log('[Obsidian Clipper] Using tabs.executeScript fallback');
-		await browser.tabs.executeScript(tabId, { file: 'content.js' });
-	}
-	console.log('[Obsidian Clipper] Injection completed, waiting for init...');
-
-	// Poll until the content script responds, rather than a fixed delay.
-	// Try immediately after injection, then back off with 50ms sleeps.
-	let ready = false;
-	for (let i = 0; i < 8; i++) {
-		try {
-			await browser.tabs.sendMessage(tabId, { action: "ping" });
-			ready = true;
-			break;
-		} catch {
-			// Not ready yet
-		}
-		await new Promise(resolve => setTimeout(resolve, 50));
-	}
-	if (!ready) {
-		throw new Error('Content script did not respond after injection');
-	}
-	console.log('[Obsidian Clipper] Post-injection ping succeeded');
+function isValidPageUrl(url: string | undefined): boolean {
+	if (!url) return false;
+	return /^https?:\/\//i.test(url);
 }
-
-async function ensureContentScriptLoadedInBackground(tabId: number): Promise<void> {
-	try {
-		// First, get the tab information
-		const tab = await browser.tabs.get(tabId);
-
-		// Check if the URL is valid before proceeding
-		if (!tab.url || !isValidUrl(tab.url)) {
-			throw new Error('Invalid URL for content script injection');
-		}
-
-		// Attempt to send a message to the content script
-		await browser.tabs.sendMessage(tabId, { action: "ping" });
-		console.log('[Obsidian Clipper] Content script ping succeeded');
-	} catch (error) {
-		// If the error is about invalid URL, re-throw it
-		if (error instanceof Error && error.message.includes('invalid URL')) {
-			throw error;
-		}
-
-		// If the message fails, the content script is not loaded, so inject it
-		console.log('[Obsidian Clipper] Ping failed, injecting content script...', error);
-		await injectContentScript(tabId);
-	}
-}
-
-// Route a message to a tab, handling both normal pages (via content script)
-// and extension pages like the reader page (via runtime.sendMessage forwarding).
-async function routeMessageToTab(tabId: number, message: any): Promise<any> {
-	const tab = await browser.tabs.get(tabId);
-	if (isNormalPageUrl(tab.url)) {
-		await ensureContentScriptLoadedInBackground(tabId);
-		return browser.tabs.sendMessage(tabId, message);
-	} else {
-		return browser.runtime.sendMessage({
-			action: 'extensionPageMessage',
-			targetTabId: tabId,
-			message
-		});
-	}
-}
-
-async function waitForTabComplete(tabId: number, timeoutMs: number = 15000): Promise<void> {
-	const startedAt = Date.now();
-	while (Date.now() - startedAt < timeoutMs) {
-		const tab = await browser.tabs.get(tabId);
-		if (tab.status === 'complete') {
-			await new Promise(resolve => setTimeout(resolve, 1200));
-			return;
-		}
-		await new Promise(resolve => setTimeout(resolve, 500));
-	}
-	throw new Error('Timed out waiting for detail tab to load');
-}
-
-const DETAIL_TASK_FILE = 'file:///D:/Downloads/zhilian_detail_tasks.jsonl';
-	const DETAIL_RESULTS_FILE = 'zhilian_detail_results.jsonl';
-	const DETAIL_DONE_LOCKS_KEY = 'jobsniper_detail_done_locks_v1';
-	const DETAIL_INFLIGHT_LOCKS_KEY = 'jobsniper_detail_inflight_locks_v1';
-	const DETAIL_INFLIGHT_TTL_MS = 10 * 60 * 1000;
-	const DETAIL_QUEUE_PAUSED_KEY = 'jobsniper_detail_queue_paused_v1';
-
-const LIST_TASK_FILE = 'file:///D:/Downloads/zhilian_list_tasks.jsonl';
-const LIST_RESULTS_FILE = 'zhilian_list_results.jsonl';
-const LIST_DONE_LOCKS_KEY = 'jobsniper_list_done_locks_v1';
-const LIST_INFLIGHT_LOCKS_KEY = 'jobsniper_list_inflight_locks_v1';
-const LIST_INFLIGHT_TTL_MS = 30 * 60 * 1000;
-
-let isDetailQueueRunning = false;
-const detailRuntimeClaims = new Set<string>();
-
-let isListQueueRunning = false;
-const listRuntimeClaims = new Set<string>();
-const listHarvestResolvers = new Map<number, (result: ListProcessResult) => void>();
-
-	type DetailTask = {
-		index: number;
-		url: string;
-		keyword?: string;
-		jobId?: string;
-	};
-
-	type QueuePauseState = {
-		paused: boolean;
-		reason?: string;
-		paused_at?: string;
-		tab_id?: number;
-	};
-
-	type ListTask = {
-		index: number;
-		url: string;
-		keyword?: string;
-		taskId?: string;
-	};
-
-type ListProcessResult = {
-	success: boolean;
-	reason?: string;
-	fileName?: string;
-};
 
 function normalizeZhilianDetailUrl(url: string): string {
 	try {
@@ -289,171 +121,172 @@ function getDetailTaskLockKey(task: Pick<DetailTask, 'url' | 'jobId'>): string {
 	return jobId ? `job:${jobId}` : `url:${normalizeZhilianDetailUrl(task.url)}`;
 }
 
-	function getListTaskLockKey(task: Pick<ListTask, 'url' | 'taskId'>): string {
-		return task.taskId ? `task:${task.taskId}` : `url:${normalizeZhilianListUrl(task.url)}`;
+function getListTaskLockKey(task: Pick<ListTask, 'url' | 'taskId'>): string {
+	return task.taskId ? `task:${task.taskId}` : `url:${normalizeZhilianListUrl(task.url)}`;
+}
+
+async function injectContentScript(tabId: number): Promise<void> {
+	await chrome.scripting.executeScript({
+		target: { tabId },
+		files: ['content.js']
+	});
+
+	for (let i = 0; i < 8; i++) {
+		try {
+			await chrome.tabs.sendMessage(tabId, { action: 'ping' });
+			return;
+		} catch {
+			await sleep(50);
+		}
+	}
+	throw new Error('Content script did not respond after injection');
+}
+
+async function ensureContentScriptLoadedInBackground(tabId: number): Promise<void> {
+	const tab = await chrome.tabs.get(tabId);
+	if (!isValidPageUrl(tab.url)) {
+		throw new Error('Invalid URL for content script injection');
 	}
 
-	async function readDetailQueuePauseState(): Promise<QueuePauseState> {
-		try {
-			const data = await chrome.storage.local.get(DETAIL_QUEUE_PAUSED_KEY);
-			const value = data[DETAIL_QUEUE_PAUSED_KEY];
-			if (value && typeof value === 'object') {
-				const v = value as any;
-				return {
-					paused: Boolean(v.paused),
-					reason: typeof v.reason === 'string' ? v.reason : undefined,
-					paused_at: typeof v.paused_at === 'string' ? v.paused_at : undefined,
-					tab_id: typeof v.tab_id === 'number' ? v.tab_id : undefined
-				};
+	try {
+		await chrome.tabs.sendMessage(tabId, { action: 'ping' });
+	} catch {
+		await injectContentScript(tabId);
+	}
+}
+
+async function waitForTabComplete(tabId: number, timeoutMs = 15000): Promise<void> {
+	const startedAt = Date.now();
+	while (Date.now() - startedAt < timeoutMs) {
+		const tab = await chrome.tabs.get(tabId);
+		if (tab.status === 'complete') {
+			await sleep(1200);
+			return;
+		}
+		await sleep(500);
+	}
+	throw new Error('Timed out waiting for tab to load');
+}
+
+async function readDetailQueuePauseState(): Promise<QueuePauseState> {
+	try {
+		const data = await chrome.storage.local.get(DETAIL_QUEUE_PAUSED_KEY);
+		const value = data[DETAIL_QUEUE_PAUSED_KEY];
+		if (value && typeof value === 'object') {
+			const v = value as Record<string, unknown>;
+			return {
+				paused: Boolean(v.paused),
+				reason: typeof v.reason === 'string' ? v.reason : undefined,
+				paused_at: typeof v.paused_at === 'string' ? v.paused_at : undefined,
+				tab_id: typeof v.tab_id === 'number' ? v.tab_id : undefined
+			};
+		}
+	} catch {}
+	return { paused: false };
+}
+
+async function setDetailQueuePaused(paused: boolean, reason?: string, tabId?: number): Promise<void> {
+	try {
+		if (paused) {
+			await chrome.storage.local.set({
+				[DETAIL_QUEUE_PAUSED_KEY]: {
+					paused: true,
+					reason,
+					paused_at: new Date().toISOString(),
+					tab_id: tabId
+				}
+			});
+			try { await chrome.action.setBadgeBackgroundColor({ color: '#b91c1c' }); } catch {}
+			try { await chrome.action.setBadgeText({ text: 'CAP' }); } catch {}
+			try { await chrome.alarms.clear('detailQueuePoll'); } catch {}
+			return;
+		}
+
+		await chrome.storage.local.set({
+			[DETAIL_QUEUE_PAUSED_KEY]: {
+				paused: false,
+				resumed_at: new Date().toISOString()
 			}
-		} catch {}
-		return { paused: false };
-	}
+		});
+		try { await chrome.action.setBadgeText({ text: '' }); } catch {}
+		try { chrome.alarms.create('detailQueuePoll', { periodInMinutes: 5 / 60 }); } catch {}
+	} catch {}
+}
 
-	async function setDetailQueuePaused(paused: boolean, reason?: string, tabId?: number): Promise<void> {
-		try {
-			if (paused) {
-				await chrome.storage.local.set({
-					[DETAIL_QUEUE_PAUSED_KEY]: {
-						paused: true,
-						reason,
-						paused_at: new Date().toISOString(),
-						tab_id: tabId
-					}
-				});
-				// Lightweight notification channel without extra permissions:
-				// show a red badge on the extension action icon.
-				try { await chrome.action.setBadgeBackgroundColor({ color: '#b91c1c' }); } catch {}
-				try { await chrome.action.setBadgeText({ text: 'CAP' }); } catch {}
-				// Stop alarm-driven queue runs. Manual wake can resume.
-				try { await chrome.alarms.clear('detailQueuePoll'); } catch {}
-			} else {
-				await chrome.storage.local.set({
-					[DETAIL_QUEUE_PAUSED_KEY]: {
-						paused: false,
-						resumed_at: new Date().toISOString()
-					}
-				});
-				try { await chrome.action.setBadgeText({ text: '' }); } catch {}
-				// Re-enable polling; safe if already created.
-				try { chrome.alarms.create('detailQueuePoll', { periodInMinutes: 5 / 60 }); } catch {}
-			}
-		} catch {}
-	}
-
-	async function readDetailLockMap(key: string): Promise<Record<string, number>> {
-		try {
-			const data = await chrome.storage.local.get(key);
-			const value = data[key];
+async function readLockMap(key: string): Promise<Record<string, number>> {
+	try {
+		const data = await chrome.storage.local.get(key);
+		const value = data[key];
 		return value && typeof value === 'object' ? value as Record<string, number> : {};
 	} catch {
 		return {};
 	}
 }
 
-async function writeDetailLockMap(key: string, value: Record<string, number>): Promise<void> {
+async function writeLockMap(key: string, value: Record<string, number>): Promise<void> {
 	try {
 		await chrome.storage.local.set({ [key]: value });
 	} catch {}
 }
 
-async function readActiveInflightLocks(now: number): Promise<Record<string, number>> {
-	const inflight = await readDetailLockMap(DETAIL_INFLIGHT_LOCKS_KEY);
+async function readActiveInflightLocks(key: string, ttlMs: number, now: number): Promise<Record<string, number>> {
+	const inflight = await readLockMap(key);
 	let changed = false;
-	for (const [key, claimedAt] of Object.entries(inflight)) {
-		if (!Number.isFinite(claimedAt) || now - claimedAt > DETAIL_INFLIGHT_TTL_MS) {
-			delete inflight[key];
+	for (const [lockKey, claimedAt] of Object.entries(inflight)) {
+		if (!Number.isFinite(claimedAt) || now - claimedAt > ttlMs) {
+			delete inflight[lockKey];
 			changed = true;
 		}
 	}
-	if (changed) await writeDetailLockMap(DETAIL_INFLIGHT_LOCKS_KEY, inflight);
+	if (changed) await writeLockMap(key, inflight);
 	return inflight;
 }
 
-async function readActiveListInflightLocks(now: number): Promise<Record<string, number>> {
-	const inflight = await readDetailLockMap(LIST_INFLIGHT_LOCKS_KEY);
-	let changed = false;
-	for (const [key, claimedAt] of Object.entries(inflight)) {
-		if (!Number.isFinite(claimedAt) || now - claimedAt > LIST_INFLIGHT_TTL_MS) {
-			delete inflight[key];
-			changed = true;
-		}
-	}
-	if (changed) await writeDetailLockMap(LIST_INFLIGHT_LOCKS_KEY, inflight);
-	return inflight;
-}
+async function claimTask(
+	lockKey: string,
+	runtimeClaims: Set<string>,
+	doneKey: string,
+	inflightKey: string,
+	inflightTtlMs: number
+): Promise<boolean> {
+	if (runtimeClaims.has(lockKey)) return false;
+	runtimeClaims.add(lockKey);
 
-async function claimDetailTask(task: DetailTask): Promise<boolean> {
-	const lockKey = getDetailTaskLockKey(task);
-	if (detailRuntimeClaims.has(lockKey)) return false;
-	detailRuntimeClaims.add(lockKey);
 	const now = Date.now();
-	const done = await readDetailLockMap(DETAIL_DONE_LOCKS_KEY);
+	const done = await readLockMap(doneKey);
 	if (done[lockKey]) {
-		detailRuntimeClaims.delete(lockKey);
+		runtimeClaims.delete(lockKey);
 		return false;
 	}
 
-	const inflight = await readActiveInflightLocks(now);
+	const inflight = await readActiveInflightLocks(inflightKey, inflightTtlMs, now);
 	if (inflight[lockKey]) {
-		detailRuntimeClaims.delete(lockKey);
+		runtimeClaims.delete(lockKey);
 		return false;
 	}
 
 	inflight[lockKey] = now;
-	await writeDetailLockMap(DETAIL_INFLIGHT_LOCKS_KEY, inflight);
+	await writeLockMap(inflightKey, inflight);
 	return true;
 }
 
-async function claimListTask(task: ListTask): Promise<boolean> {
-	const lockKey = getListTaskLockKey(task);
-	if (listRuntimeClaims.has(lockKey)) return false;
-	listRuntimeClaims.add(lockKey);
-	const now = Date.now();
-	const done = await readDetailLockMap(LIST_DONE_LOCKS_KEY);
-	if (done[lockKey]) {
-		listRuntimeClaims.delete(lockKey);
-		return false;
-	}
+async function completeTask(
+	lockKey: string,
+	success: boolean,
+	runtimeClaims: Set<string>,
+	doneKey: string,
+	inflightKey: string
+): Promise<void> {
+	runtimeClaims.delete(lockKey);
 
-	const inflight = await readActiveListInflightLocks(now);
-	if (inflight[lockKey]) {
-		listRuntimeClaims.delete(lockKey);
-		return false;
-	}
-
-	inflight[lockKey] = now;
-	await writeDetailLockMap(LIST_INFLIGHT_LOCKS_KEY, inflight);
-	return true;
-}
-
-async function completeDetailTask(task: DetailTask, success: boolean): Promise<void> {
-	const lockKey = getDetailTaskLockKey(task);
-	const now = Date.now();
-	detailRuntimeClaims.delete(lockKey);
-	const inflight = await readDetailLockMap(DETAIL_INFLIGHT_LOCKS_KEY);
+	const inflight = await readLockMap(inflightKey);
 	delete inflight[lockKey];
-	await writeDetailLockMap(DETAIL_INFLIGHT_LOCKS_KEY, inflight);
+	await writeLockMap(inflightKey, inflight);
 
 	if (success) {
-		const done = await readDetailLockMap(DETAIL_DONE_LOCKS_KEY);
-		done[lockKey] = now;
-		await writeDetailLockMap(DETAIL_DONE_LOCKS_KEY, done);
-	}
-}
-
-async function completeListTask(task: ListTask, success: boolean): Promise<void> {
-	const lockKey = getListTaskLockKey(task);
-	const now = Date.now();
-	listRuntimeClaims.delete(lockKey);
-	const inflight = await readDetailLockMap(LIST_INFLIGHT_LOCKS_KEY);
-	delete inflight[lockKey];
-	await writeDetailLockMap(LIST_INFLIGHT_LOCKS_KEY, inflight);
-
-	if (success) {
-		const done = await readDetailLockMap(LIST_DONE_LOCKS_KEY);
-		done[lockKey] = now;
-		await writeDetailLockMap(LIST_DONE_LOCKS_KEY, done);
+		const done = await readLockMap(doneKey);
+		done[lockKey] = Date.now();
+		await writeLockMap(doneKey, done);
 	}
 }
 
@@ -462,23 +295,22 @@ async function fetchDetailTasks(): Promise<DetailTask[]> {
 		const resp = await fetch(DETAIL_TASK_FILE);
 		if (!resp.ok) return [];
 		const text = await resp.text();
-		return text.split('\n')
-			.map((line, i) => ({ line: line.trim(), index: i }))
-			.filter(({ line }) => Boolean(line))
-			.map(({ line, index }) => {
-				try {
-					const t = JSON.parse(line);
-					if (!t?.url) return undefined;
-					const task: DetailTask = {
-						index,
-						url: t.url,
-						keyword: t.keyword,
-						jobId: t.job_id || getZhilianDetailJobId(t.url)
-					};
-					return task;
-				} catch { return undefined; }
-			})
-			.filter((t): t is DetailTask => !!t?.url);
+		const tasks: DetailTask[] = [];
+		text.split('\n').forEach((rawLine, index) => {
+			const line = rawLine.trim();
+			if (!line) return;
+			try {
+				const task = JSON.parse(line);
+				if (!task?.url) return;
+				tasks.push({
+					index,
+					url: task.url,
+					keyword: task.keyword,
+					jobId: task.job_id || getZhilianDetailJobId(task.url)
+				});
+			} catch {}
+		});
+		return tasks;
 	} catch {
 		return [];
 	}
@@ -489,216 +321,78 @@ async function fetchListTasks(): Promise<ListTask[]> {
 		const resp = await fetch(LIST_TASK_FILE);
 		if (!resp.ok) return [];
 		const text = await resp.text();
-		return text.split('\n')
-			.map((line, i) => ({ line: line.trim(), index: i }))
-			.filter(({ line }) => Boolean(line))
-			.map(({ line, index }) => {
-				try {
-					const t = JSON.parse(line);
-					if (!t?.url) return undefined;
-					const task: ListTask = {
-						index,
-						url: t.url,
-						keyword: t.keyword,
-						taskId: t.task_id || t.taskId
-					};
-					return task;
-				} catch { return undefined; }
-			})
-			.filter((t): t is ListTask => !!t?.url);
+		const tasks: ListTask[] = [];
+		text.split('\n').forEach((rawLine, index) => {
+			const line = rawLine.trim();
+			if (!line) return;
+			try {
+				const task = JSON.parse(line);
+				if (!task?.url) return;
+				tasks.push({
+					index,
+					url: task.url,
+					keyword: task.keyword,
+					taskId: task.task_id || task.taskId
+				});
+			} catch {}
+		});
+		return tasks;
 	} catch {
 		return [];
 	}
 }
 
-type DetailProcessResult = { success: boolean; reason?: string };
-
-const captchaResolvers = new Map<number, (result: DetailProcessResult) => void>();
-
-async function processSingleDetailUrl(url: string): Promise<DetailProcessResult> {
-	let tabId: number | undefined;
-	let timedOut = false;
-	let resolvedResult: DetailProcessResult | undefined;
+async function readJsonlResults(fileName: string): Promise<any[]> {
 	try {
-		const tab = await browser.tabs.create({ url, active: false });
-		tabId = tab.id;
-		if (!tabId) return { success: false, reason: 'no tab id' };
-
-		// Content script auto-runs detail mode (detail=1)
-		// It parses, downloads, then sends closeCurrentTab → we remove the tab
-		// On captcha, content sends captchaDetected → we activate tab + skip
-		await new Promise<void>((resolve) => {
-			const handler = (removedId: number) => {
-				if (removedId === tabId) {
-					browser.tabs.onRemoved.removeListener(handler);
-					clearTimeout(timer);
-					captchaResolvers.delete(tabId!);
-					if (!resolvedResult) resolvedResult = { success: true };
-					resolve();
-				}
-			};
-			browser.tabs.onRemoved.addListener(handler);
-			captchaResolvers.set(tabId!, (result: DetailProcessResult) => {
-				browser.tabs.onRemoved.removeListener(handler);
-				clearTimeout(timer);
-				resolvedResult = result;
-				resolve();
-			});
-			const timer = setTimeout(() => {
-				timedOut = true;
-				browser.tabs.onRemoved.removeListener(handler);
-				captchaResolvers.delete(tabId!);
-				resolve();
-			}, 60000);
-		});
-		if (resolvedResult) return resolvedResult;
-		if (timedOut) return { success: false, reason: 'timeout (60s)' };
-		return { success: true };
-	} catch {
-		if (tabId) {
-			try { await browser.tabs.remove(tabId); } catch {}
-		}
-		return { success: false, reason: 'exception' };
-	}
-}
-
-	async function runDetailTaskQueue(): Promise<void> {
-		if (isDetailQueueRunning) return;
-		isDetailQueueRunning = true;
-
-		try {
-			const pauseState = await readDetailQueuePauseState();
-			if (pauseState.paused) {
-				console.log('[JobSniper] Detail queue paused:', pauseState.reason || 'paused');
-				isDetailQueueRunning = false;
-				return;
-			}
-
-			const tasks = await fetchDetailTasks();
-			if (tasks.length === 0) {
-				isDetailQueueRunning = false;
-				return;
-			}
-
-		const results = await readResults();
-		const doneUrls = new Set(
-			results
-				.filter((r: any) => r?.status === 'done' && r?.url)
-				.map((r: any) => normalizeZhilianDetailUrl(r.url))
-		);
-		const doneJobIds = new Set(
-			results
-				.filter((r: any) => r?.status === 'done' && (r?.job_id || r?.url))
-				.map((r: any) => r.job_id || getZhilianDetailJobId(r.url))
-				.filter(Boolean)
-		);
-		const doneLocks = await readDetailLockMap(DETAIL_DONE_LOCKS_KEY);
-		const inflightLocks = await readActiveInflightLocks(Date.now());
-		const pendingTasks = tasks.filter(t => {
-			const normalizedUrl = normalizeZhilianDetailUrl(t.url);
-			const jobId = t.jobId || getZhilianDetailJobId(t.url);
-			const lockKey = getDetailTaskLockKey(t);
-			return !doneUrls.has(normalizedUrl)
-				&& !(jobId && doneJobIds.has(jobId))
-				&& !doneLocks[lockKey]
-				&& !inflightLocks[lockKey];
-		});
-		if (pendingTasks.length === 0) {
-			isDetailQueueRunning = false;
-			return;
-		}
-
-		console.log('[JobSniper] Processing', pendingTasks.length, 'of', tasks.length, 'tasks');
-		for (const task of pendingTasks) {
-			const claimed = await claimDetailTask(task);
-			if (!claimed) {
-				console.log('[JobSniper] Skip claimed task', task.index + 1, '/', tasks.length);
-				continue;
-			}
-				console.log('[JobSniper] Task', task.index + 1, '/', tasks.length);
-				const result = await processSingleDetailUrl(task.url);
-				await writeResult(task.index, task.url, result.success ? 'done' : 'failed', result.reason, task.keyword, task.jobId);
-				await completeDetailTask(task, result.success);
-				if (!result.success && result.reason === 'captcha detected') {
-					// Stop immediately when captcha is detected to avoid burning more requests.
-					await setDetailQueuePaused(true, 'captcha detected');
-					break;
-				}
-				await new Promise(r => setTimeout(r, 2000));
-			}
-		} catch (err) {
-			console.error('[JobSniper] Queue error:', err);
-		}
-	isDetailQueueRunning = false;
-}
-
-async function readResults(): Promise<any[]> {
-	try {
-		const resp = await fetch(`file:///D:/Downloads/${DETAIL_RESULTS_FILE}`);
+		const resp = await fetch(`file:///D:/Downloads/${fileName}`);
 		if (!resp.ok) return [];
 		const text = await resp.text();
 		return text.split('\n')
 			.filter((line: string) => line.trim())
-			.map((line: string) => { try { return JSON.parse(line); } catch { return null; } })
-			.filter((r: any) => r !== null);
+			.map((line: string) => {
+				try {
+					return JSON.parse(line);
+				} catch {
+					return null;
+				}
+			})
+			.filter((record: any) => record !== null);
 	} catch {
 		return [];
 	}
 }
 
-async function writeResult(taskIndex: number, url: string, status: string, error?: string, keyword?: string, jobId?: string): Promise<void> {
-	const record: any = {
-		task_index: taskIndex,
-		url,
-		normalized_url: normalizeZhilianDetailUrl(url),
-		job_id: jobId || getZhilianDetailJobId(url),
-		keyword,
-		status,
-		recorded_at: new Date().toISOString()
-	};
-	if (error) record.error = error;
+async function writeJsonlResults(fileName: string, records: any[]): Promise<void> {
+	const content = records.map((record: any) => JSON.stringify(record)).join('\n') + '\n';
+	await chrome.downloads.download({
+		url: `data:application/x-ndjson;charset=utf-8,${encodeURIComponent(content)}`,
+		filename: fileName,
+		conflictAction: 'overwrite',
+		saveAs: false
+	});
+}
+
+async function writeDetailResult(task: DetailTask, status: string, error?: string): Promise<void> {
 	try {
-		const existing = await readResults();
+		const record: any = {
+			task_index: task.index,
+			url: task.url,
+			normalized_url: normalizeZhilianDetailUrl(task.url),
+			job_id: task.jobId || getZhilianDetailJobId(task.url),
+			keyword: task.keyword,
+			status,
+			recorded_at: new Date().toISOString()
+		};
+		if (error) record.error = error;
+
+		const existing = await readJsonlResults(DETAIL_RESULTS_FILE);
 		existing.push(record);
-		const content = existing.map((r: any) => JSON.stringify(r)).join('\n') + '\n';
-		await browser.downloads.download({
-			url: `data:application/x-ndjson;charset=utf-8,${encodeURIComponent(content)}`,
-			filename: DETAIL_RESULTS_FILE,
-			conflictAction: 'overwrite' as any,
-			saveAs: false
-		});
+		await writeJsonlResults(DETAIL_RESULTS_FILE, existing);
 	} catch {}
 }
 
-		async function startDetailQueuePolling(): Promise<void> {
-			const pauseState = await readDetailQueuePauseState();
-			if (pauseState.paused) {
-				console.log('[JobSniper] Detail queue polling not started: paused:', pauseState.reason || 'paused');
-				// Keep the badge visible across restarts.
-				try { await chrome.action.setBadgeBackgroundColor({ color: '#b91c1c' }); } catch {}
-				try { await chrome.action.setBadgeText({ text: 'CAP' }); } catch {}
-				return;
-			}
-			console.log('[JobSniper] Detail queue polling started (alarms, 5s)');
-			chrome.alarms.create('detailQueuePoll', { periodInMinutes: 5 / 60 });
-			runDetailTaskQueue();
-		}
-
-	async function readListResults(): Promise<any[]> {
-		try {
-			const resp = await fetch(`file:///D:/Downloads/${LIST_RESULTS_FILE}`);
-			if (!resp.ok) return [];
-			const text = await resp.text();
-			return text.split('\n')
-				.filter((line: string) => line.trim())
-				.map((line: string) => { try { return JSON.parse(line); } catch { return null; } })
-				.filter((r: any) => r !== null);
-		} catch {
-			return [];
-		}
-	}
-
-	async function writeListResult(task: ListTask, status: string, error?: string, fileName?: string): Promise<void> {
+async function writeListResult(task: ListTask, status: string, error?: string, fileName?: string): Promise<void> {
+	try {
 		const record: any = {
 			task_index: task.index,
 			task_id: task.taskId,
@@ -710,144 +404,260 @@ async function writeResult(taskIndex: number, url: string, status: string, error
 		};
 		if (fileName) record.file_name = fileName;
 		if (error) record.error = error;
-		try {
-			const existing = await readListResults();
-			existing.push(record);
-			const content = existing.map((r: any) => JSON.stringify(r)).join('\n') + '\n';
-			await browser.downloads.download({
-				url: `data:application/x-ndjson;charset=utf-8,${encodeURIComponent(content)}`,
-				filename: LIST_RESULTS_FILE,
-				conflictAction: 'overwrite' as any,
-				saveAs: false
-			});
-		} catch {}
-	}
 
-	async function waitForListHarvestOrTimeout(tabId: number, timeoutMs: number = 10 * 60 * 1000): Promise<ListProcessResult> {
-		let timedOut = false;
-		let resolvedResult: ListProcessResult | undefined;
+		const existing = await readJsonlResults(LIST_RESULTS_FILE);
+		existing.push(record);
+		await writeJsonlResults(LIST_RESULTS_FILE, existing);
+	} catch {}
+}
+
+async function processSingleDetailUrl(url: string): Promise<DetailProcessResult> {
+	let tabId: number | undefined;
+	let timedOut = false;
+	let resolvedResult: DetailProcessResult | undefined;
+
+	try {
+		const tab = await chrome.tabs.create({ url, active: false });
+		tabId = tab.id;
+		if (!tabId) return { success: false, reason: 'no tab id' };
+
 		await new Promise<void>((resolve) => {
-			const handler = (removedId: number) => {
-				if (removedId === tabId) {
-					browser.tabs.onRemoved.removeListener(handler);
-					clearTimeout(timer);
-					listHarvestResolvers.delete(tabId);
-					if (!resolvedResult) resolvedResult = { success: false, reason: 'tab closed' };
-					resolve();
-				}
-			};
-			browser.tabs.onRemoved.addListener(handler);
-			listHarvestResolvers.set(tabId, (result: ListProcessResult) => {
-				browser.tabs.onRemoved.removeListener(handler);
+			const cleanup = () => {
+				chrome.tabs.onRemoved.removeListener(handleRemoved);
 				clearTimeout(timer);
+				if (tabId) captchaResolvers.delete(tabId);
+			};
+			const handleRemoved = (removedId: number) => {
+				if (removedId !== tabId) return;
+				cleanup();
+				if (!resolvedResult) resolvedResult = { success: true };
+				resolve();
+			};
+			const timer = setTimeout(() => {
+				timedOut = true;
+				cleanup();
+				resolve();
+			}, 60000);
+
+			chrome.tabs.onRemoved.addListener(handleRemoved);
+			captchaResolvers.set(tabId!, (result: DetailProcessResult) => {
+				cleanup();
 				resolvedResult = result;
 				resolve();
 			});
-			const timer = setTimeout(() => {
-				timedOut = true;
-				browser.tabs.onRemoved.removeListener(handler);
-				listHarvestResolvers.delete(tabId);
-				resolve();
-			}, timeoutMs);
 		});
+
 		if (resolvedResult) return resolvedResult;
-		if (timedOut) return { success: false, reason: `timeout (${Math.floor(timeoutMs / 1000)}s)` };
-		return { success: false, reason: 'unknown' };
+		if (timedOut) return { success: false, reason: 'timeout (60s)' };
+		return { success: true };
+	} catch (error) {
+		if (tabId) {
+			try { await chrome.tabs.remove(tabId); } catch {}
+		}
+		return { success: false, reason: error instanceof Error ? error.message : 'exception' };
 	}
+}
 
-	async function processSingleListUrl(url: string): Promise<ListProcessResult> {
-		let tabId: number | undefined;
-		try {
-			const tab = await browser.tabs.create({ url, active: false });
-			tabId = tab.id;
-			if (!tabId) return { success: false, reason: 'no tab id' };
-			await waitForTabComplete(tabId, 30000);
-			await ensureContentScriptLoadedInBackground(tabId);
-			const result = await waitForListHarvestOrTimeout(tabId);
-			return result;
-		} catch (err) {
-			return { success: false, reason: err instanceof Error ? err.message : String(err) };
-		} finally {
-			if (tabId) {
-				try { await browser.tabs.remove(tabId); } catch {}
-			}
+async function waitForListHarvestOrTimeout(tabId: number, timeoutMs = 10 * 60 * 1000): Promise<ListProcessResult> {
+	let timedOut = false;
+	let resolvedResult: ListProcessResult | undefined;
+
+	await new Promise<void>((resolve) => {
+		const cleanup = () => {
+			chrome.tabs.onRemoved.removeListener(handleRemoved);
+			clearTimeout(timer);
+			listHarvestResolvers.delete(tabId);
+		};
+		const handleRemoved = (removedId: number) => {
+			if (removedId !== tabId) return;
+			cleanup();
+			if (!resolvedResult) resolvedResult = { success: false, reason: 'tab closed' };
+			resolve();
+		};
+		const timer = setTimeout(() => {
+			timedOut = true;
+			cleanup();
+			resolve();
+		}, timeoutMs);
+
+		chrome.tabs.onRemoved.addListener(handleRemoved);
+		listHarvestResolvers.set(tabId, (result: ListProcessResult) => {
+			cleanup();
+			resolvedResult = result;
+			resolve();
+		});
+	});
+
+	if (resolvedResult) return resolvedResult;
+	if (timedOut) return { success: false, reason: `timeout (${Math.floor(timeoutMs / 1000)}s)` };
+	return { success: false, reason: 'unknown' };
+}
+
+async function processSingleListUrl(url: string): Promise<ListProcessResult> {
+	let tabId: number | undefined;
+	try {
+		const tab = await chrome.tabs.create({ url, active: false });
+		tabId = tab.id;
+		if (!tabId) return { success: false, reason: 'no tab id' };
+
+		await waitForTabComplete(tabId, 30000);
+		await ensureContentScriptLoadedInBackground(tabId);
+		return await waitForListHarvestOrTimeout(tabId);
+	} catch (error) {
+		return { success: false, reason: error instanceof Error ? error.message : String(error) };
+	} finally {
+		if (tabId) {
+			try { await chrome.tabs.remove(tabId); } catch {}
 		}
 	}
+}
 
-	async function runListTaskQueue(): Promise<void> {
-		if (isListQueueRunning) return;
-		isListQueueRunning = true;
-		try {
-			const tasks = await fetchListTasks();
-			if (tasks.length === 0) {
-				isListQueueRunning = false;
-				return;
-			}
+async function runDetailTaskQueue(): Promise<void> {
+	if (isDetailQueueRunning) return;
+	isDetailQueueRunning = true;
 
-			const results = await readListResults();
-			const doneTaskIds = new Set(
-				results
-					.filter((r: any) => r?.status === 'done' && r?.task_id)
-					.map((r: any) => String(r.task_id))
-			);
-			const doneUrls = new Set(
-				results
-					.filter((r: any) => r?.status === 'done' && r?.url)
-					.map((r: any) => normalizeZhilianListUrl(r.url))
-			);
-			const doneLocks = await readDetailLockMap(LIST_DONE_LOCKS_KEY);
-			const inflightLocks = await readActiveListInflightLocks(Date.now());
-			const pendingTasks = tasks.filter(t => {
-				const lockKey = getListTaskLockKey(t);
-				const normalizedUrl = normalizeZhilianListUrl(t.url);
-				return !(t.taskId && doneTaskIds.has(String(t.taskId)))
-					&& !doneUrls.has(normalizedUrl)
-					&& !doneLocks[lockKey]
-					&& !inflightLocks[lockKey];
-			});
-			if (pendingTasks.length === 0) {
-				isListQueueRunning = false;
-				return;
-			}
-
-			console.log('[JobSniper] List queue processing', pendingTasks.length, 'of', tasks.length, 'tasks');
-			for (const task of pendingTasks) {
-				const claimed = await claimListTask(task);
-				if (!claimed) {
-					console.log('[JobSniper] List skip claimed task', task.index + 1, '/', tasks.length);
-					continue;
-				}
-				console.log('[JobSniper] List task', task.index + 1, '/', tasks.length);
-				const result = await processSingleListUrl(task.url);
-				await writeListResult(task, result.success ? 'done' : 'failed', result.reason, result.fileName);
-				await completeListTask(task, result.success);
-				await new Promise(r => setTimeout(r, 2000));
-			}
-		} catch (err) {
-			console.error('[JobSniper] List queue error:', err);
+	try {
+		const pauseState = await readDetailQueuePauseState();
+		if (pauseState.paused) {
+			console.log('[Joblens] Detail queue paused:', pauseState.reason || 'paused');
+			return;
 		}
+
+		const tasks = await fetchDetailTasks();
+		if (tasks.length === 0) return;
+
+		const results = await readJsonlResults(DETAIL_RESULTS_FILE);
+		const doneUrls = new Set(
+			results
+				.filter((record: any) => record?.status === 'done' && record?.url)
+				.map((record: any) => normalizeZhilianDetailUrl(record.url))
+		);
+		const doneJobIds = new Set(
+			results
+				.filter((record: any) => record?.status === 'done' && (record?.job_id || record?.url))
+				.map((record: any) => record.job_id || getZhilianDetailJobId(record.url))
+				.filter(Boolean)
+		);
+		const doneLocks = await readLockMap(DETAIL_DONE_LOCKS_KEY);
+		const inflightLocks = await readActiveInflightLocks(DETAIL_INFLIGHT_LOCKS_KEY, DETAIL_INFLIGHT_TTL_MS, Date.now());
+		const pendingTasks = tasks.filter(task => {
+			const normalizedUrl = normalizeZhilianDetailUrl(task.url);
+			const jobId = task.jobId || getZhilianDetailJobId(task.url);
+			const lockKey = getDetailTaskLockKey(task);
+			return !doneUrls.has(normalizedUrl)
+				&& !(jobId && doneJobIds.has(jobId))
+				&& !doneLocks[lockKey]
+				&& !inflightLocks[lockKey];
+		});
+
+		if (pendingTasks.length === 0) return;
+
+		console.log('[Joblens] Detail queue processing', pendingTasks.length, 'of', tasks.length, 'tasks');
+		for (const task of pendingTasks) {
+			const lockKey = getDetailTaskLockKey(task);
+			const claimed = await claimTask(
+				lockKey,
+				detailRuntimeClaims,
+				DETAIL_DONE_LOCKS_KEY,
+				DETAIL_INFLIGHT_LOCKS_KEY,
+				DETAIL_INFLIGHT_TTL_MS
+			);
+			if (!claimed) {
+				console.log('[Joblens] Detail queue skip claimed task', task.index + 1, '/', tasks.length);
+				continue;
+			}
+
+			console.log('[Joblens] Detail task', task.index + 1, '/', tasks.length);
+			const result = await processSingleDetailUrl(task.url);
+			await writeDetailResult(task, result.success ? 'done' : 'failed', result.reason);
+			await completeTask(lockKey, result.success, detailRuntimeClaims, DETAIL_DONE_LOCKS_KEY, DETAIL_INFLIGHT_LOCKS_KEY);
+
+			if (!result.success && result.reason === 'captcha detected') {
+				await setDetailQueuePaused(true, 'captcha detected');
+				break;
+			}
+			await sleep(2000);
+		}
+	} catch (error) {
+		console.error('[Joblens] Detail queue error:', error);
+	} finally {
+		isDetailQueueRunning = false;
+	}
+}
+
+async function runListTaskQueue(): Promise<void> {
+	if (isListQueueRunning) return;
+	isListQueueRunning = true;
+
+	try {
+		const tasks = await fetchListTasks();
+		if (tasks.length === 0) return;
+
+		const results = await readJsonlResults(LIST_RESULTS_FILE);
+		const doneTaskIds = new Set(
+			results
+				.filter((record: any) => record?.status === 'done' && record?.task_id)
+				.map((record: any) => String(record.task_id))
+		);
+		const doneUrls = new Set(
+			results
+				.filter((record: any) => record?.status === 'done' && record?.url)
+				.map((record: any) => normalizeZhilianListUrl(record.url))
+		);
+		const doneLocks = await readLockMap(LIST_DONE_LOCKS_KEY);
+		const inflightLocks = await readActiveInflightLocks(LIST_INFLIGHT_LOCKS_KEY, LIST_INFLIGHT_TTL_MS, Date.now());
+		const pendingTasks = tasks.filter(task => {
+			const lockKey = getListTaskLockKey(task);
+			return !(task.taskId && doneTaskIds.has(String(task.taskId)))
+				&& !doneUrls.has(normalizeZhilianListUrl(task.url))
+				&& !doneLocks[lockKey]
+				&& !inflightLocks[lockKey];
+		});
+
+		if (pendingTasks.length === 0) return;
+
+		console.log('[Joblens] List queue processing', pendingTasks.length, 'of', tasks.length, 'tasks');
+		for (const task of pendingTasks) {
+			const lockKey = getListTaskLockKey(task);
+			const claimed = await claimTask(
+				lockKey,
+				listRuntimeClaims,
+				LIST_DONE_LOCKS_KEY,
+				LIST_INFLIGHT_LOCKS_KEY,
+				LIST_INFLIGHT_TTL_MS
+			);
+			if (!claimed) {
+				console.log('[Joblens] List queue skip claimed task', task.index + 1, '/', tasks.length);
+				continue;
+			}
+
+			console.log('[Joblens] List task', task.index + 1, '/', tasks.length);
+			const result = await processSingleListUrl(task.url);
+			await writeListResult(task, result.success ? 'done' : 'failed', result.reason, result.fileName);
+			await completeTask(lockKey, result.success, listRuntimeClaims, LIST_DONE_LOCKS_KEY, LIST_INFLIGHT_LOCKS_KEY);
+			await sleep(2000);
+		}
+	} catch (error) {
+		console.error('[Joblens] List queue error:', error);
+	} finally {
 		isListQueueRunning = false;
 	}
+}
 
-	function startListQueuePolling(): void {
-		console.log('[JobSniper] List queue polling started (alarms, 5s)');
-		chrome.alarms.create('listQueuePoll', { periodInMinutes: 5 / 60 });
-		runListTaskQueue();
-	}
+async function collectSingleZhilianDetail(job: { index: number; title: string; url: string }, debug: boolean): Promise<any> {
+	let tabId: number | undefined;
+	const requestedJobUrl = job.url.split('?')[0];
 
-	async function collectSingleZhilianDetail(job: { index: number; title: string; url: string }, debug: boolean): Promise<any> {
-		let tabId: number | undefined;
-		const requestedJobUrl = job.url.split('?')[0];
-		try {
-		const tab = await browser.tabs.create({ url: job.url, active: false });
+	try {
+		const tab = await chrome.tabs.create({ url: job.url, active: false });
 		tabId = tab.id;
 		if (!tabId) throw new Error('Failed to create detail tab');
 
 		await waitForTabComplete(tabId);
 		await ensureContentScriptLoadedInBackground(tabId);
-		const response = await browser.tabs.sendMessage(tabId, { action: 'parseZhilianDetail' }) as any;
+		const response = await chrome.tabs.sendMessage(tabId, { action: 'parseZhilianDetail' }) as any;
 		if (debug) {
-			console.log('[Zhilian Harvester] detail parsed', {
+			console.log('[Joblens] Detail test parsed', {
 				index: job.index,
 				title: job.title,
 				url: job.url,
@@ -855,6 +665,7 @@ async function writeResult(taskIndex: number, url: string, status: string, error
 				error: response?.error
 			});
 		}
+
 		return {
 			index: job.index,
 			title: job.title,
@@ -877,9 +688,7 @@ async function writeResult(taskIndex: number, url: string, status: string, error
 		};
 	} finally {
 		if (tabId) {
-			try {
-				await browser.tabs.remove(tabId);
-			} catch {}
+			try { await chrome.tabs.remove(tabId); } catch {}
 		}
 	}
 }
@@ -888,1106 +697,196 @@ async function collectZhilianDetailTest(jobs: Array<{ index: number; title: stri
 	const details: any[] = [];
 	for (const job of jobs.slice(0, 5)) {
 		details.push(await collectSingleZhilianDetail(job, debug));
-		await new Promise(resolve => setTimeout(resolve, 700));
+		await sleep(700);
 	}
 	return details;
 }
 
-function getHighlighterModeForTab(tabId: number): boolean {
-	return highlighterModeState[tabId] ?? false;
-}
+async function downloadFile(request: RuntimeRequest): Promise<{ success: boolean; downloadId?: number; fileName?: string; error?: string }> {
+	const dataUrl = request.dataUrl;
+	const content = request.content;
+	const mimeType = request.mimeType || 'text/markdown';
+	const fileName = sanitizeDownloadFileName(request.fileName || 'job_export.md');
+	const downloadUrl = dataUrl || (
+		typeof content === 'string'
+			? `data:${mimeType};charset=utf-8,${encodeURIComponent(content)}`
+			: ''
+	);
 
-function getReaderModeForTab(tabId: number): boolean {
-	return readerModeState[tabId] ?? false;
-}
+	if (!downloadUrl) {
+		return { success: false, error: 'Missing dataUrl or content for download' };
+	}
 
-function isReaderPageUrl(url: string | undefined): string | null {
-	if (!url) return null;
-	const readerPagePrefix = browser.runtime.getURL('reader.html');
-	if (url.startsWith(readerPagePrefix)) {
+	const downloadsApi = chrome.downloads;
+	if (!downloadsApi?.download) {
+		return { success: false, error: 'Downloads API is not available' };
+	}
+
+	return new Promise(resolve => {
 		try {
-			const parsed = new URL(url);
-			return parsed.searchParams.get('url');
-		} catch {}
-	}
-	return null;
-}
-
-async function exitReaderPageIfNeeded(tabId: number, readerUrl?: string): Promise<boolean> {
-	let originalUrl: string | null = null;
-	try {
-		const tab = await browser.tabs.get(tabId);
-		originalUrl = isReaderPageUrl(tab.url);
-	} catch {}
-
-	// Fallback: the embedded clipper passes the reader URL when
-	// tabs.get() can't access the extension page URL
-	if (!originalUrl && readerUrl) {
-		originalUrl = isReaderPageUrl(readerUrl);
-	}
-
-	if (originalUrl) {
-		await browser.tabs.update(tabId, { url: originalUrl });
-		readerModeState[tabId] = false;
-		debouncedUpdateContextMenu(tabId);
-		return true;
-	}
-	return false;
-}
-
-async function initialize() {
-	try {
-		// Set up tab listeners
-		await setupTabListeners();
-
-		browser.tabs.onRemoved.addListener((tabId) => {
-			delete highlighterModeState[tabId];
-			delete readerModeState[tabId];
-		});
-		
-		// Initialize context menu
-		await debouncedUpdateContextMenu(-1);
-
-		// Enable Origin header for YouTube innertube API requests
-		await enableYouTubeInnertubeRule();
-
-			// JobSniper: alarm-driven detail queue polling
-			chrome.alarms.onAlarm.addListener((alarm) => {
-				if (alarm.name === 'detailQueuePoll') {
-					runDetailTaskQueue();
-				}
-				if (alarm.name === 'listQueuePoll') {
-					runListTaskQueue();
-				}
-			});
-
-				// Start detail task queue polling for Zhilian job detail collection
-				await startDetailQueuePolling();
-				startListQueuePolling();
-
-		// Set up action popup based on openBehavior setting
-		await updateActionPopup();
-
-		console.log('Background script initialized successfully');
-	} catch (error) {
-		console.error('Error initializing background script:', error);
-	}
-}
-
-// Check if a popup is open for a given tab
-function isPopupOpen(tabId: number): boolean {
-	return popupPorts.hasOwnProperty(tabId);
-}
-
-browser.runtime.onConnect.addListener((port) => {
-	if (port.name === 'popup') {
-		const tabId = port.sender?.tab?.id;
-		if (tabId) {
-			popupPorts[tabId] = port;
-			port.onDisconnect.addListener(() => {
-				delete popupPorts[tabId];
-			});
-		}
-	}
-});
-
-async function sendMessageToPopup(tabId: number, message: any): Promise<void> {
-	if (isPopupOpen(tabId)) {
-		try {
-			await popupPorts[tabId].postMessage(message);
-		} catch (error) {
-			console.warn(`Error sending message to popup for tab ${tabId}:`, error);
-		}
-	}
-}
-
-
-
-// Safari: route fetch through native messaging (URLSession in Swift).
-// Called from the background script where sendNativeMessage works reliably.
-async function nativeFetch(url: string, options?: any): Promise<{ ok: boolean; status: number; text: string; error?: string }> {
-	try {
-		const result = await browser.runtime.sendNativeMessage('application.id', {
-			type: 'fetchRequest',
-			url,
-			method: options?.method || 'GET',
-			headers: options?.headers || {},
-			body: options?.body || null,
-		}) as { ok: boolean; status: number; text: string; error?: string };
-		return result || { ok: false, status: 0, text: '', error: 'Empty native response' };
-	} catch (err) {
-		return { ok: false, status: 0, text: '', error: (err as Error).message };
-	}
-}
-
-// Fetch proxy for extension pages (reader, highlights).
-// Returns a Promise for the webextension-polyfill.
-// On Firefox MV3, host_permissions require explicit user grant —
-// callers detect CORS_PERMISSION_NEEDED and prompt via permissions.request().
-browser.runtime.onMessage.addListener((request: unknown) => {
-	if (typeof request !== 'object' || request === null) return;
-	if ((request as any).action !== 'fetchProxy') return;
-	const { url, options } = request as { url: string; options?: any };
-	const fetchOptions: RequestInit = {};
-	if (options?.method) fetchOptions.method = options.method;
-	if (options?.headers) fetchOptions.headers = options.headers;
-	if (options?.body) fetchOptions.body = options.body;
-	return fetch(url, fetchOptions)
-		.then(async (resp) => {
-			const text = await resp.text();
-			// If YouTube returns bot-detection HTML, try native messaging (Safari)
-			if (!resp.ok && (text.includes('Sorry') || text.includes('<html')) && typeof browser.runtime.sendNativeMessage === 'function') {
-				return nativeFetch(url, options);
-			}
-			return { ok: resp.ok, status: resp.status, text, finalUrl: resp.url };
-		})
-		.catch(async () => {
-			// CORS failure — try native messaging (Safari), else report permission needed
-			if (typeof browser.runtime.sendNativeMessage === 'function') {
-				return nativeFetch(url, options);
-			}
-			return { ok: false, status: 0, text: '', error: 'CORS_PERMISSION_NEEDED' };
-		});
-});
-
-browser.runtime.onMessage.addListener((request: unknown, sender: browser.Runtime.MessageSender, sendResponse: (response?: any) => void): true | undefined => {
-	if (typeof request === 'object' && request !== null) {
-		const typedRequest = request as { action: string; isActive?: boolean; hasHighlights?: boolean; tabId?: number; text?: string; section?: string; readerUrl?: string };
-
-				if (typedRequest.action === 'runDetailTaskQueue') {
-					// Manual wake/resume entrypoint (e.g. clipper_detail_queue=1).
-					// If previously paused due to captcha, explicitly resume here.
-					setDetailQueuePaused(false)
-						.then(() => runDetailTaskQueue())
-						.then(() => sendResponse({ success: true }))
-						.catch((error) => sendResponse({
-							success: false,
-							error: error instanceof Error ? error.message : String(error)
-						}));
-					return true;
-				}
-
-			if (typedRequest.action === 'runListTaskQueue') {
-				runListTaskQueue()
-					.then(() => sendResponse({ success: true }))
-					.catch((error) => sendResponse({
-						success: false,
-						error: error instanceof Error ? error.message : String(error)
-					}));
-				return true;
-			}
-
-			if (typedRequest.action === 'zhilianListHarvestDone') {
-				const tabId = sender.tab?.id;
-				const resolver = tabId ? listHarvestResolvers.get(tabId) : undefined;
-				if (resolver) {
-					resolver({
-						success: Boolean((typedRequest as any).success),
-						reason: (typedRequest as any).error || undefined,
-						fileName: (typedRequest as any).fileName || undefined
-					});
-				}
-				sendResponse({ success: true });
-				return true;
-			}
-
-			if (typedRequest.action === 'copy-to-clipboard' && typedRequest.text) {
-				// Use content script to copy to clipboard
-				browser.tabs.query({active: true, currentWindow: true}).then(async (tabs) => {
-				const currentTab = tabs[0];
-				if (currentTab && currentTab.id) {
-					try {
-						const response = await browser.tabs.sendMessage(currentTab.id, {
-							action: 'copy-text-to-clipboard',
-							text: typedRequest.text
-						});
-						if ((response as any) && (response as any).success) {
-							sendResponse({success: true});
-						} else {
-							sendResponse({success: false, error: 'Failed to copy from content script'});
-						}
-					} catch (err) {
-						sendResponse({ success: false, error: (err as Error).message });
-					}
-				} else {
-					sendResponse({success: false, error: 'No active tab found'});
-				}
-			});
-			return true;
-		}
-
-		// fetchProxy is handled by a separate listener below
-
-		if (typedRequest.action === "extractContent" && sender.tab && sender.tab.id) {
-			browser.tabs.sendMessage(sender.tab.id, request).then(sendResponse);
-			return true;
-		}
-
-		if (typedRequest.action === "ensureContentScriptLoaded") {
-			const tabId = typedRequest.tabId || sender.tab?.id;
-			if (tabId) {
-				ensureContentScriptLoadedInBackground(tabId)
-					.then(() => sendResponse({ success: true }))
-					.catch((error) => sendResponse({ 
-						success: false, 
-						error: error instanceof Error ? error.message : String(error) 
-					}));
-				return true;
-			} else {
-				sendResponse({ success: false, error: 'No tab ID provided' });
-				return true;
-			}
-		}
-
-		if (typedRequest.action === "enableYouTubeEmbedRule") {
-			const tabId = sender.tab?.id;
-			if (tabId) {
-				enableYouTubeEmbedRule(tabId).then(() => {
-					sendResponse({ success: true });
-				}).catch(() => {
-					sendResponse({ success: true });
-				});
-			} else {
-				sendResponse({ success: true });
-			}
-			return true;
-		}
-
-		if (typedRequest.action === "disableYouTubeEmbedRule") {
-			disableYouTubeEmbedRule().then(() => {
-				sendResponse({ success: true });
-			}).catch(() => {
-				sendResponse({ success: true });
-			});
-			return true;
-		}
-
-		if (typedRequest.action === "sidePanelOpened") {
-			if (sender.tab && sender.tab.windowId) {
-				sidePanelOpenWindows.add(sender.tab.windowId);
-				updateCurrentActiveTab(sender.tab.windowId);
-			}
-		}
-
-		if (typedRequest.action === "sidePanelClosed") {
-			if (sender.tab && sender.tab.windowId) {
-				sidePanelOpenWindows.delete(sender.tab.windowId);
-			}
-		}
-
-		if (typedRequest.action === "highlighterModeChanged" && sender.tab && typedRequest.isActive !== undefined) {
-			const tabId = sender.tab.id;
-			if (tabId) {
-				highlighterModeState[tabId] = typedRequest.isActive;
-				sendMessageToPopup(tabId, { action: "updatePopupHighlighterUI", isActive: typedRequest.isActive });
-				debouncedUpdateContextMenu(tabId);
-			}
-		}
-
-		if (typedRequest.action === "readerModeChanged" && sender.tab && typedRequest.isActive !== undefined) {
-			const tabId = sender.tab.id;
-			if (tabId) {
-				readerModeState[tabId] = typedRequest.isActive;
-				debouncedUpdateContextMenu(tabId);
-			}
-		}
-
-		if (typedRequest.action === "highlightsCleared" && sender.tab) {
-			hasHighlights = false;
-			debouncedUpdateContextMenu(sender.tab.id!);
-		}
-
-		if (typedRequest.action === "updateHasHighlights" && sender.tab && typedRequest.hasHighlights !== undefined) {
-			hasHighlights = typedRequest.hasHighlights;
-			debouncedUpdateContextMenu(sender.tab.id!);
-		}
-
-		if (typedRequest.action === "getHighlighterMode") {
-			const tabId = typedRequest.tabId || sender.tab?.id;
-			if (tabId) {
-				sendResponse({ isActive: getHighlighterModeForTab(tabId) });
-			} else {
-				sendResponse({ isActive: false });
-			}
-			return true;
-		}
-
-		if (typedRequest.action === "getReaderMode") {
-			const tabId = typedRequest.tabId || sender.tab?.id;
-			if (tabId) {
-				sendResponse({ isActive: getReaderModeForTab(tabId) });
-			} else {
-				sendResponse({ isActive: false });
-			}
-			return true;
-		}
-
-		if (typedRequest.action === "toggleHighlighterMode" && typedRequest.tabId) {
-			toggleHighlighterMode(typedRequest.tabId)
-				.then(newMode => sendResponse({ success: true, isActive: newMode }))
-				.catch(error => sendResponse({ success: false, error: error.message }));
-			return true;
-		}
-
-		if (typedRequest.action === "openPopup") {
-			openPopup()
-				.then(() => {
-					sendResponse({ success: true });
-				})
-				.catch((error: unknown) => {
-					console.error('Error opening popup in background script:', error);
-					sendResponse({ success: false, error: error instanceof Error ? error.message : String(error) });
-				});
-			return true;
-		}
-
-		if (typedRequest.action === "toggleReaderMode" && typedRequest.tabId) {
-			const tabId = typedRequest.tabId;
-			// Check if the tab is on the extension's reader.html page
-			exitReaderPageIfNeeded(tabId, typedRequest.readerUrl).then((wasReaderPage) => {
-				if (wasReaderPage) {
-					sendResponse({ success: true, isActive: false });
+			downloadsApi.download({
+				url: downloadUrl,
+				filename: fileName,
+				conflictAction: 'uniquify',
+				saveAs: false
+			}, (downloadId?: number) => {
+				const lastError = chrome.runtime?.lastError;
+				if (lastError) {
+					resolve({ success: false, error: lastError.message });
 					return;
 				}
-				injectReaderScript(tabId).then(() => {
-					browser.tabs.sendMessage(tabId, { action: "toggleReaderMode" })
-						.then((response: any) => {
-							if (response?.success) {
-								readerModeState[tabId] = response.isActive ?? false;
-								debouncedUpdateContextMenu(tabId);
-							}
-							sendResponse(response);
-						})
-						.catch(() => {
-							// Page may have reloaded before responding (reader restore)
-							sendResponse({ success: true, isActive: false });
-						});
+				resolve({ success: true, downloadId, fileName });
+			});
+		} catch (error) {
+			resolve({ success: false, error: error instanceof Error ? error.message : String(error) });
+		}
+	});
+}
+
+async function handleCaptchaDetected(sender: chrome.runtime.MessageSender): Promise<void> {
+	const tabId = sender.tab?.id;
+	if (!tabId) return;
+
+	console.log('[Joblens] Captcha detected, bringing tab to foreground:', tabId);
+	try { await chrome.tabs.update(tabId, { active: true }); } catch {}
+	if (sender.tab?.windowId) {
+		try { await chrome.windows.update(sender.tab.windowId, { focused: true }); } catch {}
+	}
+
+	await setDetailQueuePaused(true, 'captcha detected', tabId);
+	const resolver = captchaResolvers.get(tabId);
+	if (resolver) {
+		resolver({ success: false, reason: 'captcha detected' });
+	}
+}
+
+function handleRuntimeMessage(
+	request: any,
+	sender: chrome.runtime.MessageSender,
+	sendResponse: (response?: any) => void
+): boolean {
+	if (typeof request !== 'object' || request === null) return false;
+
+	const typedRequest = request as RuntimeRequest;
+	switch (typedRequest.action) {
+		case 'runDetailTaskQueue':
+			setDetailQueuePaused(false)
+				.then(() => runDetailTaskQueue())
+				.then(() => sendResponse({ success: true }))
+				.catch(error => sendResponse({ success: false, error: error instanceof Error ? error.message : String(error) }));
+			return true;
+
+		case 'runListTaskQueue':
+			runListTaskQueue()
+				.then(() => sendResponse({ success: true }))
+				.catch(error => sendResponse({ success: false, error: error instanceof Error ? error.message : String(error) }));
+			return true;
+
+		case 'zhilianListHarvestDone': {
+			const tabId = sender.tab?.id;
+			const resolver = tabId ? listHarvestResolvers.get(tabId) : undefined;
+			if (resolver) {
+				resolver({
+					success: Boolean(typedRequest.success),
+					reason: typedRequest.error,
+					fileName: typedRequest.fileName
 				});
-			});
-			return true;
-		}
-
-		if (typedRequest.action === "getActiveTabAndToggleIframe") {
-			browser.tabs.query({active: true, currentWindow: true}).then(async (tabs) => {
-				const currentTab = tabs[0];
-				if (currentTab && currentTab.id) {
-					try {
-						await routeMessageToTab(currentTab.id, { action: "toggle-iframe" });
-						sendResponse({success: true});
-					} catch (error) {
-						console.error('Error sending toggle-iframe message:', error);
-						sendResponse({success: false, error: error instanceof Error ? error.message : String(error)});
-					}
-				} else {
-					sendResponse({success: false, error: 'No active tab found'});
-				}
-			});
-			return true;
-		}
-
-		if (typedRequest.action === "toggleIframe") {
-			const tab = sender.tab;
-			if (tab?.id) {
-				routeMessageToTab(tab.id, { action: "toggle-iframe" })
-					.then(() => sendResponse({ success: true }))
-					.catch((error) => {
-						console.error('Error toggling iframe:', error);
-						sendResponse({ success: false, error: error instanceof Error ? error.message : String(error) });
-					});
-			} else {
-				sendResponse({ success: false, error: 'Cannot open iframe on this page' });
 			}
-			return true;
-		}
-
-		if (typedRequest.action === "getActiveTab") {
-			browser.tabs.query({active: true, currentWindow: true}).then(async (tabs) => {
-				let currentTab = tabs[0];
-				// Fallback for when currentWindow has no tabs (e.g., debugging popup in DevTools)
-				if (!currentTab || !currentTab.id) {
-					const allActiveTabs = await browser.tabs.query({active: true});
-					currentTab = allActiveTabs.find(tab =>
-						tab.id && tab.url && !tab.url.startsWith('chrome-extension://') && !tab.url.startsWith('moz-extension://')
-					) || allActiveTabs[0];
-				}
-				if (currentTab && currentTab.id) {
-					sendResponse({tabId: currentTab.id});
-				} else {
-					sendResponse({error: 'No active tab found'});
-				}
-			});
-			return true;
-		}
-
-		if (typedRequest.action === "openOptionsPage") {
-			try {
-				if (typeof browser.runtime.openOptionsPage === 'function') {
-					// Chrome way
-					browser.runtime.openOptionsPage();
-				} else {
-					// Firefox way
-					browser.tabs.create({
-						url: browser.runtime.getURL('settings.html')
-					});
-				}
-				sendResponse({success: true});
-			} catch (error) {
-				console.error('Error opening options page:', error);
-				sendResponse({success: false, error: error instanceof Error ? error.message : String(error)});
-			}
-			return true;
-		}
-
-		if (typedRequest.action === "openHighlights") {
-			const domain = (typedRequest as any).domain;
-			const query = domain ? `?domain=${encodeURIComponent(domain)}` : '';
-			browser.tabs.create({ url: browser.runtime.getURL(`highlights.html${query}`) });
 			sendResponse({ success: true });
 			return true;
 		}
 
-		if (typedRequest.action === "openSettings") {
-			try {
-				const section = typedRequest.section ? `?section=${typedRequest.section}` : '';
-				browser.tabs.create({
-					url: browser.runtime.getURL(`settings.html${section}`)
-				});
-				sendResponse({success: true});
-			} catch (error) {
-				console.error('Error opening settings:', error);
-				sendResponse({success: false, error: error instanceof Error ? error.message : String(error)});
-			}
-			return true;
-		}
-
-		if (typedRequest.action === "copyMarkdownToClipboard" || typedRequest.action === "saveMarkdownToFile") {
-			if (sender.tab?.id) {
-				routeMessageToTab(sender.tab.id, { action: typedRequest.action })
-					.then(() => sendResponse({success: true}))
-					.catch((error) => sendResponse({success: false, error: error instanceof Error ? error.message : String(error)}));
-				return true;
-			}
-		}
-
-		if (typedRequest.action === "getTabInfo") {
-			browser.tabs.get(typedRequest.tabId as number).then((tab) => {
-				// For reader page tabs, return the article URL so the
-				// clipper treats it as a normal web page
-				const url = isReaderPageUrl(tab.url) ?? tab.url;
-				sendResponse({
-					success: true,
-					tab: {
-						id: tab.id,
-						url: url
-					}
-				});
-			}).catch((error) => {
-				console.error('Error getting tab info:', error);
-				sendResponse({
-					success: false,
-					error: error instanceof Error ? error.message : String(error)
-				});
-			});
-			return true;
-		}
-
-		if (typedRequest.action === "forceInjectContentScript") {
-			const tabId = typedRequest.tabId;
-			if (tabId) {
-				injectContentScript(tabId)
-					.then(() => sendResponse({ success: true }))
-					.catch((error) => {
-						console.error('[Obsidian Clipper] forceInjectContentScript failed:', error);
-						sendResponse({ success: false, error: error instanceof Error ? error.message : String(error) });
-					});
-				return true;
-			} else {
-				sendResponse({ success: false, error: 'Missing tabId' });
-				return true;
-			}
-		}
-
-		if (typedRequest.action === "sendMessageToTab") {
-			const tabId = (typedRequest as any).tabId;
-			const message = (typedRequest as any).message;
-			if (tabId && message) {
-				routeMessageToTab(tabId, message).then((response) => {
-					sendResponse(response);
-				}).catch((error) => {
-					console.error('[Obsidian Clipper] Error sending message to tab:', error);
-					sendResponse({
-						success: false,
-						error: error instanceof Error ? error.message : String(error)
-					});
-				});
-				return true;
-			} else {
-				sendResponse({
-					success: false,
-					error: 'Missing tabId or message'
-				});
-				return true;
-			}
-		}
-
-		if (typedRequest.action === "closeCurrentTab") {
-			const tabId = sender.tab?.id;
-			if (tabId) {
-				browser.tabs.remove(tabId)
-					.then(() => sendResponse({ success: true }))
-					.catch((err: Error) => sendResponse({ success: false, error: err.message }));
-			} else {
-				sendResponse({ success: false, error: 'No sender tab' });
-			}
-			return true;
-		}
-
-			if (typedRequest.action === "captchaDetected") {
-				const tabId = sender.tab?.id;
-				if (tabId) {
-					console.log('[JobSniper] Captcha detected, bringing tab to foreground:', tabId);
-					(async () => {
-						// Notify user: bring to front + action badge; pause the queue.
-						browser.tabs.update(tabId, { active: true }).catch(() => {});
-						browser.windows.update(sender.tab!.windowId!, { focused: true }).catch(() => {});
-						await setDetailQueuePaused(true, 'captcha detected', tabId);
-
-						const resolveCaptcha = captchaResolvers.get(tabId);
-						if (resolveCaptcha) {
-							resolveCaptcha({ success: false, reason: 'captcha detected' });
-						}
-						sendResponse({ success: true });
-					})().catch(() => sendResponse({ success: true }));
-				} else {
-					sendResponse({ success: false, error: 'No sender tab' });
-				}
-				return true;
-			}
-
-		if (typedRequest.action === "zhilianCollectDetailTest") {
-			const jobs = ((typedRequest as any).jobs || []) as Array<{ index: number; title: string; url: string }>;
-			const debug = Boolean((typedRequest as any).debug);
-			if (!Array.isArray(jobs) || jobs.length === 0) {
+		case 'zhilianCollectDetailTest':
+			if (!Array.isArray(typedRequest.jobs) || typedRequest.jobs.length === 0) {
 				sendResponse({ success: false, error: 'Missing jobs for detail test' });
 				return true;
 			}
-			collectZhilianDetailTest(jobs, debug)
+			collectZhilianDetailTest(typedRequest.jobs, Boolean(typedRequest.debug))
 				.then(details => sendResponse({ success: true, details }))
-				.catch(error => sendResponse({
-					success: false,
-					error: error instanceof Error ? error.message : String(error)
-				}));
+				.catch(error => sendResponse({ success: false, error: error instanceof Error ? error.message : String(error) }));
+			return true;
+
+		case 'finalDownloadOnly':
+			downloadFile(typedRequest)
+				.then(sendResponse)
+				.catch(error => sendResponse({ success: false, error: error instanceof Error ? error.message : String(error) }));
+			return true;
+
+		case 'closeCurrentTab': {
+			const tabId = sender.tab?.id;
+			if (!tabId) {
+				sendResponse({ success: false, error: 'No sender tab' });
+				return true;
+			}
+			chrome.tabs.remove(tabId)
+				.then(() => sendResponse({ success: true }))
+				.catch(error => sendResponse({ success: false, error: error instanceof Error ? error.message : String(error) }));
 			return true;
 		}
 
-		if (typedRequest.action === "openReaderPage") {
-			const articleUrl = (typedRequest as any).url;
-			if (articleUrl && sender.tab?.id) {
-				const readerUrl = browser.runtime.getURL('reader.html?url=' + encodeURIComponent(articleUrl));
-				browser.tabs.update(sender.tab.id, { url: readerUrl })
-					.then(() => sendResponse({ success: true }))
-					.catch((error) => sendResponse({ success: false, error: error instanceof Error ? error.message : String(error) }));
-			} else {
-				sendResponse({ success: false, error: 'Missing URL or tab' });
+		case 'captchaDetected':
+			handleCaptchaDetected(sender)
+				.then(() => sendResponse({ success: true }))
+				.catch(error => sendResponse({ success: false, error: error instanceof Error ? error.message : String(error) }));
+			return true;
+
+		case 'ensureContentScriptLoaded': {
+			const tabId = typedRequest.tabId || sender.tab?.id;
+			if (!tabId) {
+				sendResponse({ success: false, error: 'No tab ID provided' });
+				return true;
 			}
+			ensureContentScriptLoadedInBackground(tabId)
+				.then(() => sendResponse({ success: true }))
+				.catch(error => sendResponse({ success: false, error: error instanceof Error ? error.message : String(error) }));
 			return true;
 		}
 
-		if (typedRequest.action === "finalDownloadOnly") {
-			const dataUrl = (typedRequest as any).dataUrl;
-			const content = (typedRequest as any).content;
-			const mimeType = (typedRequest as any).mimeType || 'text/markdown';
-			const rawFileName = (typedRequest as any).fileName || 'job_export.md';
-			const fileName = sanitizeDownloadFileName(rawFileName);
-
-			const downloadUrl = dataUrl || (
-				typeof content === 'string'
-					? `data:${mimeType};charset=utf-8,${encodeURIComponent(content)}`
-					: ''
-			);
-
-			if (!downloadUrl) {
-				sendResponse({ success: false, error: 'Missing dataUrl or content for download' });
-				return true;
-			}
-
-			console.log('[Obsidian Clipper] Starting final download', {
-				fileName,
-				hasDataUrl: Boolean(dataUrl),
-				contentLength: typeof content === 'string' ? content.length : undefined
-			});
-
-			const downloadsApi = (typeof chrome !== 'undefined' && chrome.downloads)
-				? chrome.downloads
-				: (browser as any).downloads;
-
-			if (!downloadsApi?.download) {
-				sendResponse({ success: false, error: 'Downloads API is not available' });
-				return true;
-			}
-
-			try {
-				const options = {
-					url: downloadUrl,
-					filename: fileName,
-					conflictAction: 'uniquify' as any,
-					saveAs: false
-				};
-
-				const maybePromise = downloadsApi.download(options, (downloadId?: number) => {
-					const lastError = typeof chrome !== 'undefined' ? chrome.runtime?.lastError : undefined;
-					if (lastError) {
-						console.error('[Obsidian Clipper] Download failed', lastError.message);
-						sendResponse({ success: false, error: lastError.message });
-						return;
-					}
-					console.log('[Obsidian Clipper] Download queued', { downloadId, fileName });
-					sendResponse({ success: true, downloadId, fileName });
-				});
-
-				if (maybePromise?.then) {
-					maybePromise
-						.then((downloadId: number) => {
-							console.log('[Obsidian Clipper] Download queued', { downloadId, fileName });
-							sendResponse({ success: true, downloadId, fileName });
-						})
-						.catch((error: Error) => {
-							console.error('[Obsidian Clipper] Download failed', error);
-							sendResponse({ success: false, error: error instanceof Error ? error.message : String(error) });
-						});
-				}
-			} catch (error) {
-				console.error('[Obsidian Clipper] Download setup failed', error);
-				sendResponse({ success: false, error: error instanceof Error ? error.message : String(error) });
-			}
+		case 'ping':
+			sendResponse({ success: true });
 			return true;
-		}
 
-
-
-
-                if (typedRequest.action === "openObsidianUrl") {
-			const url = (typedRequest as any).url;
-			if (url) {
-				browser.tabs.query({active: true, currentWindow: true}).then((tabs) => {
-					const currentTab = tabs[0];
-					if (currentTab && currentTab.id) {
-						browser.tabs.update(currentTab.id, { url: url }).then(() => {
-							sendResponse({ success: true });
-						}).catch((error) => {
-							console.error('Error opening Obsidian URL:', error);
-							sendResponse({
-								success: false,
-								error: error instanceof Error ? error.message : String(error)
-							});
-						});
-					} else {
-						sendResponse({
-							success: false,
-							error: 'No active tab found'
-						});
-					}
-				}).catch((error) => {
-					console.error('Error querying tabs:', error);
-					sendResponse({
-						success: false,
-						error: error instanceof Error ? error.message : String(error)
-					});
-				});
-				return true;
-			} else {
-				sendResponse({
-					success: false,
-					error: 'Missing URL'
-				});
-				return true;
-			}
-		}
-
-		// For other actions that use sendResponse
-		if (typedRequest.action === "extractContent" ||
-			typedRequest.action === "ensureContentScriptLoaded" ||
-			typedRequest.action === "getHighlighterMode" ||
-			typedRequest.action === "toggleHighlighterMode" ||
-			typedRequest.action === "openObsidianUrl") {
-			return true;
-		}
+		default:
+			return false;
 	}
-	return undefined;
-});
-
-const commandsApi = (browser as any).commands;
-if (commandsApi?.onCommand?.addListener) {
-	commandsApi.onCommand.addListener(async (command: string, tab?: browser.Tabs.Tab) => {
-		// Some browsers (e.g. Orion) don't pass the tab parameter, so fall back to querying
-		if (!tab?.id) {
-			const tabs = await browser.tabs.query({active: true, currentWindow: true});
-			tab = tabs[0];
-		}
-
-		if (command === 'quick_clip') {
-			if (tab?.id) {
-				openPopup();
-				setTimeout(() => {
-					browser.runtime.sendMessage({action: "triggerQuickClip"})
-						.catch(error => console.error("Failed to send quick clip message:", error));
-				}, 500);
-			}
-		}
-		if (command === "toggle_highlighter" && tab?.id) {
-			await ensureContentScriptLoadedInBackground(tab.id);
-			toggleHighlighterMode(tab.id);
-		}
-		if (command === "copy_to_clipboard" && tab?.id) {
-			await browser.tabs.sendMessage(tab.id, { action: "copyToClipboard" });
-		}
-		if (command === "toggle_reader" && tab?.id) {
-			await ensureContentScriptLoadedInBackground(tab.id);
-			await injectReaderScript(tab.id);
-			await browser.tabs.sendMessage(tab.id, { action: "toggleReaderMode" });
-		}
-	});
 }
 
-const debouncedUpdateContextMenu = debounce(async (tabId: number) => {
-	const contextMenusApi = (browser as any).contextMenus;
-	if (!contextMenusApi?.removeAll || !contextMenusApi?.create) {
+async function startDetailQueuePolling(): Promise<void> {
+	const pauseState = await readDetailQueuePauseState();
+	if (pauseState.paused) {
+		console.log('[Joblens] Detail queue polling not started: paused:', pauseState.reason || 'paused');
+		try { await chrome.action.setBadgeBackgroundColor({ color: '#b91c1c' }); } catch {}
+		try { await chrome.action.setBadgeText({ text: 'CAP' }); } catch {}
 		return;
 	}
-	if (isContextMenuCreating) {
-		return;
-	}
-	isContextMenuCreating = true;
 
-	try {
-		await contextMenusApi.removeAll();
+	console.log('[Joblens] Detail queue polling started (alarms, 5s)');
+	chrome.alarms.create('detailQueuePoll', { periodInMinutes: 5 / 60 });
+	runDetailTaskQueue();
+}
 
-		let currentTabId = tabId;
-		if (currentTabId === -1) {
-			const tabs = await browser.tabs.query({ active: true, currentWindow: true });
-			if (tabs.length > 0) {
-				currentTabId = tabs[0].id!;
-			}
+function startListQueuePolling(): void {
+	console.log('[Joblens] List queue polling started (alarms, 5s)');
+	chrome.alarms.create('listQueuePoll', { periodInMinutes: 5 / 60 });
+	runListTaskQueue();
+}
+
+async function initialize(): Promise<void> {
+	chrome.alarms.onAlarm.addListener((alarm) => {
+		if (alarm.name === 'detailQueuePoll') {
+			runDetailTaskQueue();
 		}
-
-		const isHighlighterMode = getHighlighterModeForTab(currentTabId);
-		const isReaderMode = getReaderModeForTab(currentTabId);
-
-		const menuItems: {
-			id: string;
-			title: string;
-			contexts: browser.Menus.ContextType[];
-		}[] = [
-				{
-					id: "open-obsidian-clipper",
-					title: "Save this page",
-					contexts: ["page", "selection", "image", "video", "audio"]
-				},
-				{
-					id: 'copy-markdown-to-clipboard',
-					title: browser.i18n.getMessage('copyToClipboard'),
-					contexts: ["page", "selection"]
-				},
-				{
-					id: isReaderMode ? "exit-reader" : "enter-reader",
-					title: isReaderMode ? browser.i18n.getMessage('disableReader') : browser.i18n.getMessage('readerOn'),
-					contexts: ["page", "selection"]
-				},
-				{
-					id: isHighlighterMode ? "exit-highlighter" : "enter-highlighter",
-					title: isHighlighterMode ? browser.i18n.getMessage('disableHighlighter') : browser.i18n.getMessage('highlighterOn'),
-					contexts: ["page","image", "video", "audio"]
-				},
-				{
-					id: "highlight-selection",
-					title: "Add to highlights",
-					contexts: ["selection"]
-				},
-				{
-					id: "highlight-element",
-					title: "Add to highlights",
-					contexts: ["image", "video", "audio"]
-				},
-				{
-					id: 'open-embedded',
-					title: browser.i18n.getMessage('openEmbedded'),
-					contexts: ["page", "selection"]
-				}
-			];
-
-		const browserType = await detectBrowser();
-		if (browserType === 'chrome') {
-			menuItems.push({
-				id: 'open-side-panel',
-				title: browser.i18n.getMessage('openSidePanel'),
-				contexts: ["page", "selection"]
-			});
-		}
-
-		for (const item of menuItems) {
-			await contextMenusApi.create(item);
-		}
-	} catch (error) {
-		console.error('Error updating context menu:', error);
-	} finally {
-		isContextMenuCreating = false;
-	}
-}, 100); // 100ms debounce time
-
-const contextMenusApi = (browser as any).contextMenus;
-if (contextMenusApi?.onClicked?.addListener) {
-	contextMenusApi.onClicked.addListener(async (info: browser.Menus.OnClickData, tab?: browser.Tabs.Tab) => {
-		if (info.menuItemId === "open-obsidian-clipper") {
-			openPopup();
-		} else if (info.menuItemId === "enter-highlighter" && tab && tab.id) {
-			await setHighlighterMode(tab.id, true);
-		} else if (info.menuItemId === "exit-highlighter" && tab && tab.id) {
-			await setHighlighterMode(tab.id, false);
-		} else if (info.menuItemId === "highlight-selection" && tab && tab.id) {
-			await highlightSelection(tab.id, info);
-		} else if (info.menuItemId === "highlight-element" && tab && tab.id) {
-			await highlightElement(tab.id, info);
-		} else if ((info.menuItemId === "enter-reader" || info.menuItemId === "exit-reader") && tab && tab.id) {
-			await ensureContentScriptLoadedInBackground(tab.id);
-			await injectReaderScript(tab.id);
-			const response = await browser.tabs.sendMessage(tab.id, { action: "toggleReaderMode" }) as { success?: boolean; isActive?: boolean };
-			if (response?.success) {
-				readerModeState[tab.id] = response.isActive ?? false;
-				debouncedUpdateContextMenu(tab.id);
-			}
-		} else if (info.menuItemId === 'open-embedded' && tab && tab.id) {
-			await ensureContentScriptLoadedInBackground(tab.id);
-			await browser.tabs.sendMessage(tab.id, { action: "toggle-iframe" });
-		} else if (info.menuItemId === 'open-side-panel' && tab && tab.id && tab.windowId) {
-			chrome.sidePanel.open({ tabId: tab.id });
-			sidePanelOpenWindows.add(tab.windowId);
-			await ensureContentScriptLoadedInBackground(tab.id);
-		} else if (info.menuItemId === 'copy-markdown-to-clipboard' && tab && tab.id) {
-			await ensureContentScriptLoadedInBackground(tab.id);
-			await browser.tabs.sendMessage(tab.id, { action: "copyMarkdownToClipboard" });
+		if (alarm.name === 'listQueuePoll') {
+			runListTaskQueue();
 		}
 	});
+
+	chrome.runtime.onMessage.addListener(handleRuntimeMessage);
+	await startDetailQueuePolling();
+	startListQueuePolling();
+	console.log('[Joblens] Background script initialized');
 }
 
-browser.runtime.onInstalled.addListener(() => {
-	debouncedUpdateContextMenu(-1); // Use a dummy tabId for initial creation
-});
-
-async function isSidePanelOpen(windowId: number): Promise<boolean> {
-	return sidePanelOpenWindows.has(windowId);
-}
-
-async function setupTabListeners() {
-	const browserType = await detectBrowser();
-	if (['chrome', 'brave', 'edge'].includes(browserType)) {
-		browser.tabs.onActivated.addListener(handleTabChange);
-		browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-			if (changeInfo.status === 'complete') {
-				handleTabChange({ tabId, windowId: tab.windowId });
-			}
-		});
-	}
-}
-
-const debouncedPaintHighlights = debounce(async (tabId: number) => {
-	if (!getHighlighterModeForTab(tabId)) {
-		await setHighlighterMode(tabId, false);
-	}
-	await paintHighlights(tabId);
-}, 250);
-
-async function handleTabChange(activeInfo: { tabId: number; windowId?: number }) {
-	if (activeInfo.windowId && await isSidePanelOpen(activeInfo.windowId)) {
-		updateCurrentActiveTab(activeInfo.windowId);
-		await debouncedPaintHighlights(activeInfo.tabId);
-	}
-}
-
-async function paintHighlights(tabId: number) {
-	try {
-		const tab = await browser.tabs.get(tabId);
-		if (!tab || !tab.url || !isValidUrl(tab.url) || isBlankPage(tab.url)) {
-			return;
-		}
-
-		await ensureContentScriptLoadedInBackground(tabId);
-		await browser.tabs.sendMessage(tabId, { action: "paintHighlights" });
-
-	} catch (error) {
-		console.error('Error painting highlights:', error);
-	}
-}
-
-async function setHighlighterMode(tabId: number, activate: boolean) {
-	try {
-		// First, check if the tab exists
-		const tab = await browser.tabs.get(tabId);
-		if (!tab || !tab.url) {
-			return;
-		}
-
-		// Check if the URL is valid and not a blank page
-		if (!isValidUrl(tab.url) || isBlankPage(tab.url)) {
-			return;
-		}
-
-		// Then, ensure the content script is loaded
-		await ensureContentScriptLoadedInBackground(tabId);
-
-		// Now try to send the message
-		highlighterModeState[tabId] = activate;
-		await browser.tabs.sendMessage(tabId, { action: "setHighlighterMode", isActive: activate });
-		debouncedUpdateContextMenu(tabId);
-		await sendMessageToPopup(tabId, { action: "updatePopupHighlighterUI", isActive: activate });
-
-	} catch (error) {
-		console.error('Error setting highlighter mode:', error);
-		// If there's an error, assume highlighter mode should be off
-		highlighterModeState[tabId] = false;
-		debouncedUpdateContextMenu(tabId);
-		await sendMessageToPopup(tabId, { action: "updatePopupHighlighterUI", isActive: false });
-	}
-}
-
-async function toggleHighlighterMode(tabId: number): Promise<boolean> {
-	try {
-		const currentMode = getHighlighterModeForTab(tabId);
-		const newMode = !currentMode;
-		highlighterModeState[tabId] = newMode;
-		await browser.tabs.sendMessage(tabId, { action: "setHighlighterMode", isActive: newMode });
-		debouncedUpdateContextMenu(tabId);
-		await sendMessageToPopup(tabId, { action: "updatePopupHighlighterUI", isActive: newMode });
-		return newMode;
-	} catch (error) {
-		console.error('Error toggling highlighter mode:', error);
-		throw error;
-	}
-}
-
-async function highlightSelection(tabId: number, info: browser.Menus.OnClickData) {
-	highlighterModeState[tabId] = true;
-	
-	const highlightData: Partial<TextHighlightData> = {
-		id: Date.now().toString(),
-		type: 'text',
-		content: info.selectionText || '',
-	};
-
-	await browser.tabs.sendMessage(tabId, { 
-		action: "highlightSelection", 
-		isActive: true,
-		highlightData,
-	});
-	hasHighlights = true;
-	debouncedUpdateContextMenu(tabId);
-}
-
-async function highlightElement(tabId: number, info: browser.Menus.OnClickData) {
-	highlighterModeState[tabId] = true;
-
-	await browser.tabs.sendMessage(tabId, { 
-		action: "highlightElement", 
-		isActive: true,
-		targetElementInfo: {
-			mediaType: info.mediaType === 'image' ? 'img' : info.mediaType,
-			srcUrl: info.srcUrl,
-			pageUrl: info.pageUrl
-		}
-	});
-	hasHighlights = true;
-	debouncedUpdateContextMenu(tabId);
-}
-
-async function injectReaderScript(tabId: number) {
-	try {
-		await browser.scripting.insertCSS({
-			target: { tabId },
-			files: ['reader.css']
-		});
-		await browser.scripting.insertCSS({
-			target: { tabId },
-			files: ['highlighter.css']
-		}).catch(() => {});
-
-		// Inject scripts in sequence for all browsers
-		await browser.scripting.executeScript({
-			target: { tabId },
-			files: ['browser-polyfill.min.js']
-		});
-		await browser.scripting.executeScript({
-			target: { tabId },
-			files: ['reader-script.js']
-		});
-
-		return true;
-	} catch (error) {
-		console.error('Error injecting reader script:', error);
-		return false;
-	}
-}
-
-// When set to 'reader' or 'embedded', clear the popup so action.onClicked fires
-// instead, handling the action directly without briefly opening the popup.
-const validOpenBehaviors: Settings['openBehavior'][] = ['popup', 'embedded', 'reader'];
-
-function parseOpenBehavior(raw: string | undefined): Settings['openBehavior'] {
-	return validOpenBehaviors.includes(raw as Settings['openBehavior']) ? raw as Settings['openBehavior'] : 'popup';
-}
-
-async function updateActionPopup(openBehavior?: Settings['openBehavior']): Promise<void> {
-	if (!openBehavior) {
-		const data = await browser.storage.sync.get('general_settings');
-		openBehavior = parseOpenBehavior((data.general_settings as Record<string, string>)?.openBehavior);
-	}
-	currentOpenBehavior = openBehavior;
-	if (openBehavior === 'reader' || openBehavior === 'embedded') {
-		await browser.action.setPopup({ popup: '' });
-	} else {
-		await browser.action.setPopup({ popup: 'popup.html' });
-	}
-}
-
-let currentOpenBehavior: Settings['openBehavior'] = 'popup';
-
-// In reader/embedded mode, opens embedded iframe instead of popup.
-async function openPopup(): Promise<void> {
-	if (currentOpenBehavior === 'reader' || currentOpenBehavior === 'embedded') {
-		const tabs = await browser.tabs.query({ active: true, currentWindow: true });
-		const tab = tabs[0];
-		if (tab?.id && tab.url && isValidUrl(tab.url) && !isBlankPage(tab.url)) {
-			await ensureContentScriptLoadedInBackground(tab.id);
-			await browser.tabs.sendMessage(tab.id, { action: "toggle-iframe" });
-			return;
-		}
-		// Fall through to popup if tab is invalid
-	}
-	await browser.action.openPopup();
-}
-
-browser.action.onClicked.addListener(async (tab) => {
-	if (!tab?.id || !tab.url || !isValidUrl(tab.url) || isBlankPage(tab.url)) return;
-
-	if (currentOpenBehavior === 'reader') {
-		await ensureContentScriptLoadedInBackground(tab.id);
-		await injectReaderScript(tab.id);
-		const response = await browser.tabs.sendMessage(tab.id, { action: "toggleReaderMode" }) as { success?: boolean; isActive?: boolean };
-		if (response?.success) {
-			readerModeState[tab.id] = response.isActive ?? false;
-			debouncedUpdateContextMenu(tab.id);
-		}
-	} else if (currentOpenBehavior === 'embedded') {
-		await ensureContentScriptLoadedInBackground(tab.id);
-		await browser.tabs.sendMessage(tab.id, { action: "toggle-iframe" });
-	}
-});
-
-browser.storage.onChanged.addListener((changes, area) => {
-	if (area === 'sync' && changes.general_settings) {
-		updateActionPopup(parseOpenBehavior((changes.general_settings.newValue as Record<string, string>)?.openBehavior));
-	}
-});
-
-// Initialize the extension
 initialize().catch(error => {
-	console.error('Failed to initialize background script:', error);
+	console.error('[Joblens] Failed to initialize background script:', error);
 });

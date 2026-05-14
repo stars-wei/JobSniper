@@ -13,7 +13,7 @@ Current focus: **智联招聘 (Zhilian)**. BOSS直聘 scaffolding exists but is 
 ```bash
 # Install Python deps (Python 3.12+)
 python3 -m venv venv && venv/bin/pip install -r requirements.txt
-venv/bin/pip install -r requirements-dev.txt  # for pytest
+venv/bin/pip install -r requirements-dev.txt  # pytest, pytest-mock, pytest-cov
 
 # Import-level smoke test (no MCP protocol)
 venv/bin/python scraping_layer/scripts/smoke_mcp_server.py
@@ -21,14 +21,14 @@ venv/bin/python scraping_layer/scripts/smoke_mcp_server.py
 # Full protocol-level smoke test (launches stdio MCP client against the server)
 venv/bin/python scraping_layer/scripts/smoke_mcp_server.py --stdio
 
-# Run Python tests (tests/ directory)
+# Run Python tests (add test files to tests/ first)
 venv/bin/python -m pytest tests/ -v
 
 # Build Chrome extension (after changing scraping_layer/joblens/src/)
-cd scraping_layer/joblens && npm install && npm run build:chrome
+cd scraping_layer/joblens && npm install && npm run build
 
-# Run Chrome extension tests
-cd scraping_layer/joblens && npm test
+# Dev mode (auto-rebuild on changes)
+cd scraping_layer/joblens && npm run dev
 ```
 
 ## Architecture
@@ -55,7 +55,17 @@ The MCP server does **not** scrape directly. Instead:
 1. MCP tool writes a task line to a JSONL file in `D:\Downloads\` (`zhilian_list_tasks.jsonl` or `zhilian_detail_tasks.jsonl`)
 2. Optionally launches Chrome with a wake URL parameter (debounced per queue type via `/tmp/` lock files) that alerts the extension's alarm polling
 3. Joblens extension picks up the task, navigates, scrapes, writes results to the corresponding `*_results.jsonl`
-4. A bash monitor script (`watch_downloads.sh` / `watch_job_list.sh`) watches results files and invokes `scraping_layer/scripts/archive_outputs.py` to move files into the vault
+4. A bash monitor script watches results files and invokes `scraping_layer/scripts/archive_outputs.py` to move files into the vault:
+
+```bash
+# Monitor detail collection queue (polling interval 15s)
+bash scraping_layer/scripts/watch_downloads.sh
+
+# Monitor list collection queue (polling interval 15s)
+bash scraping_layer/scripts/watch_job_list.sh
+```
+
+Each monitor is idempotent (lock-file protected). They detect captcha, handle retries, trigger archive on completion, and pop up a Windows notification via `powershell.exe`.
 
 Key implication: the MCP server and the browser run in **different OS environments** (WSL vs Windows). Files pass through `/mnt/d/Downloads` which is the Windows `D:\Downloads` mounted into WSL. This mount may be read-only from the WSL side, so the archive tool falls back to copy when move fails.
 

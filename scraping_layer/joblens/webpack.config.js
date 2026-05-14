@@ -1,168 +1,45 @@
 const path = require('path');
-const fs = require('fs');
 const CopyPlugin = require('copy-webpack-plugin');
-const MiniCssExtractPlugin = require('mini-css-extract-plugin');
-const ZipPlugin = require('zip-webpack-plugin');
-const package = require('./package.json');
-const webpack = require('webpack');
 const TerserPlugin = require('terser-webpack-plugin');
 
-// Remove .DS_Store files
-function removeDSStore(dir) {
-	const files = fs.readdirSync(dir);
-	files.forEach(file => {
-		const filePath = path.join(dir, file);
-		if (fs.statSync(filePath).isDirectory()) {
-			removeDSStore(filePath);
-		} else if (file === '.DS_Store') {
-			fs.unlinkSync(filePath);
-		}
-	});
-}
-
 module.exports = (env, argv) => {
-	const isProduction = argv.mode === 'production';
+  const isProduction = argv.mode === 'production';
 
-	const getOutputDir = () => {
-		return isProduction ? 'dist' : 'dev';
-	};
-
-	const outputDir = getOutputDir();
-	const browserName = 'chrome';
-
-	const mainConfig = {
-		mode: argv.mode,
-		entry: {
-			content: './src/content.ts',
-			background: './src/background.ts'
-		},
-		output: {
-			path: path.resolve(__dirname, outputDir),
-			filename: '[name].js',
-			module: false,
-			clean: true,
-		},
-		devtool: isProduction ? false : 'source-map',
-		optimization: {
-			minimize: true,
-			minimizer: [
-				new TerserPlugin({
-					terserOptions: {
-						mangle: false,
-						compress: {
-							defaults: true,
-							global_defs: {
-								DEBUG_MODE: !isProduction
-							},
-							unused: true,
-							dead_code: true,
-							passes: 2,
-							ecma: 2020,
-							module: false
-						},
-						format: {
-							ascii_only: true,
-							comments: false,
-							ecma: 2020
-						},
-						module: false,
-						toplevel: true,
-						keep_classnames: true,
-						keep_fnames: true
-					},
-					extractComments: false
-				})
-			],
-			moduleIds: 'named',
-			chunkIds: 'named'
-		},
-		experiments: {
-			outputModule: false,
-		},
-		resolve: {
-			extensions: ['.ts', '.js'],
-			alias: {
-				'./utils/browser-polyfill': path.resolve(__dirname, 'node_modules/webextension-polyfill/dist/browser-polyfill.min.js'),
-				'../utils/browser-polyfill': path.resolve(__dirname, 'node_modules/webextension-polyfill/dist/browser-polyfill.min.js')
-			}
-		},
-		module: {
-			rules: [
-				{
-					test: /\.tsx?$/,
-					use: [
-						{
-							loader: 'ts-loader',
-							options: {
-								compilerOptions: {
-									module: 'ES2020'
-								}
-							}
-						}
-					],
-					exclude: /node_modules/,
-				},
-				{
-					test: /\.scss$/,
-					use: [
-						MiniCssExtractPlugin.loader,
-						{
-							loader: 'css-loader',
-							options: {
-								sourceMap: !isProduction
-							}
-						},
-						{
-							loader: 'sass-loader',
-							options: {
-								sourceMap: !isProduction
-							}
-						}
-					]
-				}
-			]
-		},
-		plugins: [
-			new CopyPlugin({
-				patterns: [
-					{ 
-						from: "src/manifest.chrome.json", 
-						to: "manifest.json" 
-                                                ,transform(content) {
-                                                        const manifest = JSON.parse(content.toString());
-                                                        manifest.version = package.version;
-                                                        if (!isProduction) {
-                                                                manifest.name = "Clipper (Dev)";
-                                                        }
-                                                        return JSON.stringify(manifest, null, 2);
-                                                }
-					},
-					{ from: "src/icons/*.png", to: "icons/[name][ext]" },
-					{ from: "node_modules/webextension-polyfill/dist/browser-polyfill.min.js", to: "browser-polyfill.min.js" }
-				],
-			}),
-			new MiniCssExtractPlugin({
-				filename: '[name].css'
-			}),
-			{
-				apply: (compiler) => {
-					compiler.hooks.afterEmit.tap('RemoveDSStore', (compilation) => {
-						removeDSStore(path.resolve(__dirname, outputDir));
-					});
-				}
-			},
-			new webpack.DefinePlugin({
-				'process.env.NODE_ENV': JSON.stringify(argv.mode),
-				'DEBUG_MODE': JSON.stringify(!isProduction)
-			}),
-			...(isProduction ? [
-				new ZipPlugin({
-					path: path.resolve(__dirname, 'builds'),
-					filename: `joblens-${package.version}-${browserName}.zip`,
-				})
-			] : [])
-		]
-	};
-
-	return [mainConfig];
+  return {
+    mode: argv.mode,
+    entry: {
+      content: './src/content.ts',
+      background: './src/background.ts'
+    },
+    output: {
+      path: path.resolve(__dirname, 'dist'),
+      filename: '[name].js',
+      clean: true,
+    },
+    devtool: isProduction ? false : 'source-map',
+    resolve: {
+      extensions: ['.ts', '.js'],
+    },
+    module: {
+      rules: [
+        {
+          test: /\.ts$/,
+          use: 'ts-loader',
+          exclude: /node_modules/,
+        },
+      ],
+    },
+    optimization: {
+      minimize: isProduction,
+      minimizer: [new TerserPlugin()],
+    },
+    plugins: [
+      new CopyPlugin({
+        patterns: [
+          { from: "src/manifest.json", to: "manifest.json" },
+          { from: "src/icons", to: "icons", noErrorOnMissing: true }
+        ],
+      }),
+    ],
+  };
 };

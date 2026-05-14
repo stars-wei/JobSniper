@@ -1,28 +1,18 @@
 {
-	"compilerOptions": {
-		"baseUrl": "src",
-		"paths": {
-			"*": ["*"],
-			"managers/*": ["managers/*"],
-			"utils/*": ["utils/*"],
-			"icons": ["icons"]
-		},
-		"target": "es6",
-		"module": "es6",
-		"strict": true,
-		"esModuleInterop": true,
-		"skipLibCheck": true,
-		"forceConsistentCasingInFileNames": true,
-		"outDir": "./dist",
-		"rootDir": "./src",
-		"sourceMap": true,
-		"typeRoots": ["./node_modules/@types", "./src/types"],
-		"moduleResolution": "node",
-		"types": ["chrome", "webextension-polyfill", "node", "webpack-env"],
-		"lib": ["es2017", "dom"]
-	},
-	"include": [
-		"src/**/*"
-	],
-	"exclude": ["node_modules", "dist"]
+  "compilerOptions": {
+    "target": "ES2020",
+    "module": "ESNext",
+    "lib": ["ES2020", "DOM", "DOM.Iterable"],
+    "moduleResolution": "bundler",
+    "strict": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "outDir": "./dist",
+    "sourceMap": true,
+    "isolatedModules": true,
+    "rootDir": "./src",
+    "types": ["chrome"]
+  },
+  "include": ["src/**/*"]
 }

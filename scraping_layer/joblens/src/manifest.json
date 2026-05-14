@@ -1,0 +1,37 @@
+{
+  "manifest_version": 3,
+  "name": "Joblens",
+  "version": "1.0.0",
+  "description": "Next-generation recruitment intelligence harvesting engine.",
+  "author": "stars-wei",
+  "homepage_url": "https://github.com/stars-wei/JobSniper",
+  "permissions": [
+    "activeTab",
+    "storage",
+    "downloads",
+    "scripting",
+    "alarms"
+  ],
+  "host_permissions": [
+    "https://*.zhaopin.com/*",
+    "file:///D:/Downloads/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "https://*.zhaopin.com/*"
+      ],
+      "js": [
+        "content.js"
+      ]
+    }
+  ],
+  "icons": {
+    "16": "icons/icon16.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  }
+}

@@ -436,15 +436,15 @@ def launch_zhilian_job_list_collection(
         "kw": keyword,
         "jl": city_id,
         "cityId": city_id,
-        "clipper_city": city_id,
-        "clipper_auto": "1",
-        "clipper_pages": str(pages),
-        "clipper_keyword": keyword,
-        "clipper_keyword_b64u": _base64url_utf8(keyword),
-        "clipper_list_queue": "1",
+        "joblens_city": city_id,
+        "joblens_auto": "1",
+        "joblens_pages": str(pages),
+        "joblens_keyword": keyword,
+        "joblens_keyword_b64u": _base64url_utf8(keyword),
+        "joblens_list_queue": "1",
     }
     if test:
-        params["clipper_test"] = "1"
+        params["joblens_test"] = "1"
     if debug:
         params["debug"] = "1"
 
@@ -462,7 +462,7 @@ def launch_zhilian_job_list_collection(
         chrome_error = None
         wake_debounced = False
         if wake_browser:
-            wake_params = {"clipper_list_queue_wake": "1"}
+            wake_params = {"joblens_list_queue_wake": "1"}
             if debug:
                 wake_params["debug"] = "1"
             wake_url = f"https://www.zhaopin.com/?{urlencode(wake_params)}"
@@ -491,7 +491,7 @@ def launch_zhilian_job_menu_collection(
     """
     params: dict[str, str] = {
         "jl": city_id,
-        "clipper_keyword_discovery": "1",
+        "joblens_keyword_discovery": "1",
     }
     if debug:
         params["debug"] = "1"
@@ -540,7 +540,7 @@ def launch_zhilian_job_detail_collection(
     detail_url = urlunparse(parsed._replace(query=urlencode(params)))
     wake_url = None
     if wake_browser:
-        wake_params = {"clipper_detail_queue": "1"}
+        wake_params = {"joblens_detail_queue": "1"}
         if debug:
             wake_params["debug"] = "1"
         wake_url = f"https://www.zhaopin.com/?{urlencode(wake_params)}"
