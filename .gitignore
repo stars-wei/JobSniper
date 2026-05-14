@@ -7,3 +7,5 @@ __pycache__/
 *.log
 .claude/settings.local.json
 docs/DEV_LOG.md
+scraping_layer/joblens/node_modules/
+scraping_layer/joblens/dist/
