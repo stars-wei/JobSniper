@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "description": "Professional recruitment intelligence harvesting engine for JobSniper.",
   "author": "stars-wei",
+  "license": "PolyForm-Noncommercial-1.0.0",
   "scripts": {
     "build": "webpack --mode production",
     "dev": "webpack --watch --mode development"

@@ -377,3 +377,7 @@ Git hygiene：
 git status --short --branch
 git diff --check
 ```
+
+## 许可证
+
+本项目采用 PolyForm Noncommercial License 1.0.0。源码仅允许个人学习、研究、教育和非商业用途。任何商业使用、商业集成、SaaS 服务、企业内部生产使用或商业培训使用，均需获得作者书面授权。
