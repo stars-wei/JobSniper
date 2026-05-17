@@ -103,11 +103,12 @@ async def run_stdio_smoke(timeout_seconds: float) -> None:
                 resources = await session.list_resources()
                 tool_names = {tool.name for tool in tools.tools}
                 resource_uris = {str(resource.uri) for resource in resources.resources}
-                _assert(len(tool_names) == 6, "MCP tool list should expose exactly 6 tools")
+                _assert(len(tool_names) == 6, f"MCP tool list should expose exactly 6 tools, got {len(tool_names)}")
                 _assert("find_job_detail" in tool_names, "MCP tool list should include find_job_detail")
-                _assert("launch_zhilian_job_menu_collection" in tool_names, "MCP tool list should include job menu collection")
-                _assert("launch_zhilian_job_list_collection" in tool_names, "MCP tool list should include job list collection")
-                _assert("launch_zhilian_job_detail_collection" in tool_names, "MCP tool list should include job detail collection")
+                _assert("launch_job_list_collection" in tool_names, "MCP tool list should include unified job list collection")
+                _assert("launch_job_menu_collection" in tool_names, "MCP tool list should include unified job menu collection")
+                _assert("launch_job_detail_collection" in tool_names, "MCP tool list should include unified job detail collection")
+                _assert("launch_zhilian_job_list_collection" not in tool_names, "MCP should not expose deprecated wrappers")
                 _assert("trigger_clipper" not in tool_names, "MCP tool list should not include trigger_clipper stub")
                 _assert("launch_zhilian_collection" not in tool_names, "MCP tool list should not include legacy collection entrypoint")
                 _assert("launch_zhilian_keyword_discovery" not in tool_names, "MCP tool list should not include legacy keyword-discovery entrypoint")

@@ -29,6 +29,7 @@ POSITIONS_PATH = STORAGE_PATH / "positions"
 VAULT_PATH = POSITIONS_PATH / "zhilian_intelligence_vault"
 BOSS_VAULT_PATH = POSITIONS_PATH / "boss_intelligence_vault"
 TASKS_PATH = POSITIONS_PATH / "zhilian_master_tasks.json"
+BOSS_TASKS_PATH = POSITIONS_PATH / "boss_master_tasks.json"
 SCRAPING_PATH = BASE_DIR / "scraping_layer"
 JOBLENS_PATH = SCRAPING_PATH / "joblens"
 JOBLENS_DIST_PATH = JOBLENS_PATH / "dist"
@@ -36,6 +37,8 @@ DOWNLOADS_PATH = "/mnt/d/Downloads"
 WINDOWS_CHROME_PATH = "/mnt/c/Program Files/Google/Chrome/Application/chrome.exe"
 MONITOR_SCRIPT = SCRAPING_PATH / "scripts" / "watch_downloads.sh"
 LIST_MONITOR_SCRIPT = SCRAPING_PATH / "scripts" / "watch_job_list.sh"
+BOSS_MONITOR_SCRIPT = SCRAPING_PATH / "scripts" / "watch_boss_downloads.sh"
+BOSS_LIST_MONITOR_SCRIPT = SCRAPING_PATH / "scripts" / "watch_boss_job_list.sh"
 DETAIL_WAKE_LOCK = Path("/tmp/jobsniper_detail_queue_wake")
 DETAIL_WAKE_DEBOUNCE_SECONDS = 10
 LIST_WAKE_LOCK = Path("/tmp/jobsniper_list_queue_wake")
@@ -208,15 +211,31 @@ def _job_category_dir(keyword: str, task: dict[str, str], vault_path: Path) -> P
 def _platform_task_prefix(platform: str) -> str:
     return "ZHILIAN" if platform == "zhilian" else "BOSS"
 
+
+def _platform_tasks_path(platform: str) -> Path:
+    return TASKS_PATH if platform == "zhilian" else BOSS_TASKS_PATH
+
+
+def _platform_task_file(platform: str, queue_type: str) -> Path:
+    """queue_type: 'list_tasks' 或 'detail_tasks'"""
+    prefix = {"zhilian": "zhilian", "boss": "boss"}[platform]
+    return Path(DOWNLOADS_PATH) / f"{prefix}_{queue_type}.jsonl"
+
+
 def _load_zhilian_task(keyword: str) -> dict[str, str]:
+    return _load_platform_task("zhilian", keyword)
+
+
+def _load_platform_task(platform: str, keyword: str) -> dict[str, str]:
     fallback = {
         "keyword": keyword,
         "industry": "Unknown_Industry",
         "domain": "Unknown_Domain",
         "url": "",
     }
+    tasks_path = _platform_tasks_path(platform)
     try:
-        with open(TASKS_PATH, "r", encoding="utf-8") as f:
+        with open(tasks_path, "r", encoding="utf-8") as f:
             tasks = json.load(f)
     except Exception:
         return fallback
@@ -230,6 +249,109 @@ def _load_zhilian_task(keyword: str) -> dict[str, str]:
                 "url": task.get("url") or "",
             }
     return fallback
+
+
+# ----------------------------------------------------------------
+# 平台 URL 构建 helper
+# ----------------------------------------------------------------
+
+def _build_list_url(platform: str, keyword: str, city_id: str, pages: str, test: bool, debug: bool) -> str:
+    if platform == "boss":
+        params: dict[str, str] = {
+            "query": keyword,
+            "city": city_id,
+            "joblens_auto": "1",
+            "joblens_pages": str(pages),
+            "joblens_keyword": keyword,
+            "joblens_keyword_b64u": _base64url_utf8(keyword),
+            "joblens_list_queue": "1",
+        }
+        if test:
+            params["joblens_test"] = "1"
+        if debug:
+            params["debug"] = "1"
+        return f"https://www.zhipin.com/web/geek/job?{urlencode(params)}"
+
+    params = {
+        "kw": keyword,
+        "jl": city_id,
+        "cityId": city_id,
+        "joblens_city": city_id,
+        "joblens_auto": "1",
+        "joblens_pages": str(pages),
+        "joblens_keyword": keyword,
+        "joblens_keyword_b64u": _base64url_utf8(keyword),
+        "joblens_list_queue": "1",
+    }
+    if test:
+        params["joblens_test"] = "1"
+    if debug:
+        params["debug"] = "1"
+    return f"https://sou.zhaopin.com/?{urlencode(params)}"
+
+
+def _build_detail_url(platform: str, job_url: str, keyword: str, debug: bool, save_html: bool, save_json: bool) -> str:
+    parsed = urlparse(job_url)
+    params = dict(parse_qsl(parsed.query, keep_blank_values=True))
+    params["detail"] = "1"
+    if keyword.strip():
+        params["kw"] = keyword.strip()
+        params["kw64"] = _base64url_utf8(keyword.strip())
+    if debug:
+        params["debug"] = "1"
+    params["html"] = "1" if save_html else "0"
+    params["json"] = "1" if save_json else "0"
+    return urlunparse(parsed._replace(query=urlencode(params)))
+
+
+def _build_menu_url(platform: str, city_id: str, debug: bool) -> str:
+    if platform == "boss":
+        # BOSS SEO landing pages use city name slugs, not numeric codes
+        _BOSS_CITY_SLUG: dict[str, str] = {
+            "101020100": "shanghai",
+            "101010100": "beijing",
+            "101280100": "guangzhou",
+            "101280600": "shenzhen",
+            "101210100": "hangzhou",
+        }
+        city_slug = _BOSS_CITY_SLUG.get(city_id, city_id)
+        params: dict[str, str] = {"joblens_keyword_discovery": "1", "joblens_city": city_id}
+        if debug:
+            params["debug"] = "1"
+        return f"https://www.zhipin.com/{city_slug}/?{urlencode(params)}"
+
+    params: dict[str, str] = {"jl": city_id, "joblens_keyword_discovery": "1"}
+    if debug:
+        params["debug"] = "1"
+    return f"https://www.zhaopin.com/?{urlencode(params)}"
+
+
+def _build_platform_wake_url(platform: str, queue_type: str, debug: bool) -> str:
+    """queue_type: 'list' 或 'detail'"""
+    if platform == "boss":
+        params: dict[str, str] = {f"joblens_{queue_type}_queue_wake": "1"}
+        if debug:
+            params["debug"] = "1"
+        return f"https://www.zhipin.com/?{urlencode(params)}"
+
+    params: dict[str, str] = {f"joblens_{queue_type}_queue_wake": "1"}
+    if debug:
+        params["debug"] = "1"
+    return f"https://www.zhaopin.com/?{urlencode(params)}"
+
+
+def _validate_job_url(job_url: str, platform: str) -> tuple[bool, str]:
+    try:
+        parsed = urlparse(job_url)
+    except Exception:
+        return False, "job_url is invalid"
+    if parsed.scheme not in {"http", "https"}:
+        return False, "job_url must be an http(s) URL"
+    if platform == "zhilian" and "zhaopin.com" not in parsed.netloc:
+        return False, "zhilian job_url must be a zhaopin.com URL"
+    if platform == "boss" and "zhipin.com" not in parsed.netloc:
+        return False, "boss job_url must be a zhipin.com URL"
+    return True, ""
 
 def _parse_frontmatter_keyword(file_path: Path) -> str | None:
     """从 markdown 文件 YAML frontmatter 中提取 keyword 字段。"""
@@ -264,7 +386,7 @@ def _target_for_joblens_output(file_path: Path, keyword: str, task: dict[str, st
     is_raw = suffix in {".json", ".html"} or "_RAW_" in name or name.startswith(f"{pfx}_RAW_")
     job_dir = _job_category_dir(keyword, task, vault_path)
 
-    if (name.startswith("zhilian_keyword_discovery_") or name.startswith(f"{pfx}_KEYWORDS_")) and suffix == ".md":
+    if (name.startswith(f"{pfx.lower()}_keyword_discovery_") or name.startswith("zhilian_keyword_discovery_") or name.startswith(f"{pfx}_KEYWORDS_")) and suffix == ".md":
         return POSITIONS_PATH / name
 
     if name.startswith(f"{pfx}_DETAIL_"):
@@ -300,10 +422,11 @@ def _unique_target_path(target: Path) -> Path:
         counter += 1
 
 def _launch_zhilian_with_url(collection_url: str, keyword: str, launch_label: str) -> str:
-    chrome_command = [
-        WINDOWS_CHROME_PATH,
-        collection_url,
-    ]
+    return _launch_platform_with_url(collection_url, "zhilian", keyword, launch_label)
+
+
+def _launch_platform_with_url(collection_url: str, platform: str, keyword: str, launch_label: str) -> str:
+    chrome_command = [WINDOWS_CHROME_PATH, collection_url]
 
     result: dict[str, Any] = {
         "ok": False,
@@ -312,7 +435,7 @@ def _launch_zhilian_with_url(collection_url: str, keyword: str, launch_label: st
         "expected_download_dir": DOWNLOADS_PATH,
         "launch_label": launch_label,
         "suggested_archive_tool": (
-            f'archive_joblens_outputs(keyword="{keyword}", platform="zhilian", since_minutes=60, '
+            f'archive_joblens_outputs(keyword="{keyword}", platform="{platform}", since_minutes=60, '
             "dry_run=true, include_test=false)"
         ),
     }
@@ -416,8 +539,9 @@ def find_job_detail(platform: str, keyword: str, company: str | None = None, lim
     })
 
 @mcp.tool()
-def launch_zhilian_job_list_collection(
-    keyword: str,
+def launch_job_list_collection(
+    platform: str = "zhilian",
+    keyword: str = "",
     city_id: str = "538",
     pages: str = "auto",
     test: bool = False,
@@ -425,33 +549,26 @@ def launch_zhilian_job_list_collection(
     wake_browser: bool = False,
 ) -> str:
     """
-    采集智联某个职业关键词下的岗位列表。通过写入任务文件，由 Chrome 扩展后台采集。
+    采集某个职业关键词下的岗位列表。通过写入任务文件，由 Chrome 扩展后台采集。
+    参数:
+    - platform: zhilian 或 boss
+    - keyword: 岗位关键词
+    - city_id: 城市 ID (zhilian: 538=上海, boss: 101020100=上海)
+    - pages: auto 或指定页码数
+    - test: 测试模式（仅采集少量页面）
+    - debug: 调试模式
+    - wake_browser: 是否唤醒浏览器
     """
+    platform = platform.strip().lower()
+    if platform not in ("zhilian", "boss"):
+        return _json_response({"ok": False, "error": "platform must be zhilian or boss"})
     if not keyword.strip():
         return _json_response({"ok": False, "error": "keyword must not be empty"})
 
     _start_list_monitor_if_needed()
+    collection_url = _build_list_url(platform, keyword, city_id, pages, test, debug)
 
-    params: dict[str, str] = {
-        "kw": keyword,
-        "jl": city_id,
-        "cityId": city_id,
-        "joblens_city": city_id,
-        "joblens_auto": "1",
-        "joblens_pages": str(pages),
-        "joblens_keyword": keyword,
-        "joblens_keyword_b64u": _base64url_utf8(keyword),
-        "joblens_list_queue": "1",
-    }
-    if test:
-        params["joblens_test"] = "1"
-    if debug:
-        params["debug"] = "1"
-
-    collection_url = f"https://sou.zhaopin.com/?{urlencode(params)}"
-
-    # Write to list task queue file for the Chrome extension to pick up
-    task_file = Path(DOWNLOADS_PATH) / "zhilian_list_tasks.jsonl"
+    task_file = _platform_task_file(platform, "list_tasks")
     task_id = hashlib.sha1(collection_url.encode("utf-8")).hexdigest()[:16]
     task_line = json.dumps({"task_id": task_id, "url": collection_url, "keyword": keyword.strip()}) + "\n"
     try:
@@ -462,13 +579,11 @@ def launch_zhilian_job_list_collection(
         chrome_error = None
         wake_debounced = False
         if wake_browser:
-            wake_params = {"joblens_list_queue_wake": "1"}
-            if debug:
-                wake_params["debug"] = "1"
-            wake_url = f"https://www.zhaopin.com/?{urlencode(wake_params)}"
+            wake_url = _build_platform_wake_url(platform, "list", debug)
             chrome_launched, chrome_error, wake_debounced = _launch_list_queue_wake(wake_url)
         return _json_response({
             "ok": True,
+            "platform": platform,
             "task_id": task_id,
             "url": collection_url,
             "task_file": str(task_file),
@@ -481,27 +596,33 @@ def launch_zhilian_job_list_collection(
     except Exception as exc:
         return _json_response({"ok": False, "error": f"Failed to write task file: {exc}"})
 
+
 @mcp.tool()
-def launch_zhilian_job_menu_collection(
+def launch_job_menu_collection(
+    platform: str = "zhilian",
     city_id: str = "538",
     debug: bool = True,
 ) -> str:
     """
-    采集智联平台 job menu，提取行业-职能-职业三级结构。
+    采集平台 job menu，提取行业-职能-职业三级结构。
+    参数:
+    - platform: zhilian 或 boss
+    - city_id: 城市 ID
+    - debug: 调试模式
     """
-    params: dict[str, str] = {
-        "jl": city_id,
-        "joblens_keyword_discovery": "1",
-    }
-    if debug:
-        params["debug"] = "1"
+    platform = platform.strip().lower()
+    if platform not in ("zhilian", "boss"):
+        return _json_response({"ok": False, "error": "platform must be zhilian or boss"})
 
-    collection_url = f"https://www.zhaopin.com/?{urlencode(params)}"
-    return _launch_zhilian_with_url(collection_url, "job_menu", "zhilian_job_menu")
+    collection_url = _build_menu_url(platform, city_id, debug)
+    launch_label = f"{platform}_job_menu"
+    return _launch_platform_with_url(collection_url, platform, "job_menu", launch_label)
+
 
 @mcp.tool()
-def launch_zhilian_job_detail_collection(
-    job_url: str,
+def launch_job_detail_collection(
+    platform: str = "zhilian",
+    job_url: str = "",
     keyword: str = "",
     debug: bool = True,
     save_html: bool = False,
@@ -509,44 +630,34 @@ def launch_zhilian_job_detail_collection(
     wake_browser: bool = False,
 ) -> str:
     """
-    采集智联单个岗位详情页。通过写入任务文件，由 Chrome 扩展后台静默采集。
+    采集单个岗位详情页。通过写入任务文件，由 Chrome 扩展后台静默采集。
+    参数:
+    - platform: zhilian 或 boss
+    - job_url: 岗位详情页完整 URL
+    - keyword: 岗位关键词
+    - debug: 调试模式
+    - save_html: 保存原始 HTML
+    - save_json: 保存原始 JSON
+    - wake_browser: 唤醒浏览器
     """
+    platform = platform.strip().lower()
+    if platform not in ("zhilian", "boss"):
+        return _json_response({"ok": False, "error": "platform must be zhilian or boss"})
     if not job_url.strip():
         return _json_response({"ok": False, "error": "job_url must not be empty"})
-    try:
-        parsed = urlparse(job_url)
-    except Exception:
-        return _json_response({"ok": False, "error": "job_url is invalid"})
-    if parsed.scheme not in {"http", "https"} or "zhaopin.com" not in parsed.netloc:
-        return _json_response({"ok": False, "error": "job_url must be a zhaopin.com http(s) URL"})
+
+    is_valid, error_msg = _validate_job_url(job_url, platform)
+    if not is_valid:
+        return _json_response({"ok": False, "error": error_msg})
 
     _start_monitor_if_needed()
 
-    params = dict(parse_qsl(parsed.query, keep_blank_values=True))
-    params["detail"] = "1"
-    if keyword.strip():
-        params["kw"] = keyword.strip()
-        params["kw64"] = _base64url_utf8(keyword.strip())
-    if debug:
-        params["debug"] = "1"
-    if save_html:
-        params["html"] = "1"
-    else:
-        params["html"] = "0"
-    if save_json:
-        params["json"] = "1"
-    else:
-        params["json"] = "0"
-    detail_url = urlunparse(parsed._replace(query=urlencode(params)))
+    detail_url = _build_detail_url(platform, job_url, keyword, debug, save_html, save_json)
     wake_url = None
     if wake_browser:
-        wake_params = {"joblens_detail_queue": "1"}
-        if debug:
-            wake_params["debug"] = "1"
-        wake_url = f"https://www.zhaopin.com/?{urlencode(wake_params)}"
+        wake_url = _build_platform_wake_url(platform, "detail", debug)
 
-    # Write to detail task queue file for the Chrome extension to pick up
-    task_file = Path(DOWNLOADS_PATH) / "zhilian_detail_tasks.jsonl"
+    task_file = _platform_task_file(platform, "detail_tasks")
     task_line = json.dumps({"url": detail_url, "keyword": keyword.strip() or "job_detail"}) + "\n"
     try:
         with open(task_file, "a", encoding="utf-8") as f:
@@ -558,6 +669,7 @@ def launch_zhilian_job_detail_collection(
             chrome_launched, chrome_error, wake_debounced = _launch_detail_queue_wake(wake_url)
         return _json_response({
             "ok": True,
+            "platform": platform,
             "url": detail_url,
             "task_file": str(task_file),
             "wake_url": wake_url,
@@ -568,6 +680,7 @@ def launch_zhilian_job_detail_collection(
         })
     except Exception as exc:
         return _json_response({"ok": False, "error": f"Failed to write task file: {exc}"})
+
 
 @mcp.tool()
 def archive_joblens_outputs(
@@ -596,7 +709,7 @@ def archive_joblens_outputs(
 
     downloads = Path(DOWNLOADS_PATH)
     cutoff = datetime.now() - timedelta(minutes=since_minutes)
-    task = _load_zhilian_task(keyword)
+    task = _load_platform_task(platform, keyword)
     pfx = _platform_task_prefix(platform)
     planned: list[dict[str, Any]] = []
     skipped: list[dict[str, str]] = []
@@ -604,9 +717,10 @@ def archive_joblens_outputs(
     if not downloads.exists():
         return _json_response({"ok": False, "error": f"downloads path not found: {DOWNLOADS_PATH}"})
 
+    discovery_pattern = "zhilian_keyword_discovery_*.md" if platform == "zhilian" else "boss_keyword_discovery_*.md"
     candidates = {
         path
-        for pattern in (f"{pfx}_*", "zhilian_keyword_discovery_*.md")
+        for pattern in (f"{pfx}_*", discovery_pattern)
         for path in downloads.glob(pattern)
     }
     for file_path in sorted(candidates):
@@ -631,14 +745,16 @@ def archive_joblens_outputs(
         frontmatter_keyword = _parse_frontmatter_keyword(file_path) if (is_detail and file_path.suffix.lower() == ".md") else None
 
         if (
-            not file_path.name.startswith((f"{pfx}_KEYWORDS_", "zhilian_keyword_discovery_", f"{pfx}_DETAIL_RAW_", f"{pfx}_DETAIL_MANIFEST_"))
+            not file_path.name.startswith((f"{pfx}_KEYWORDS_", f"{pfx}_DETAIL_RAW_", f"{pfx}_DETAIL_MANIFEST_"))
+            and not file_path.name.startswith(f"{pfx.lower()}_keyword_discovery_")
+            and not file_path.name.startswith("zhilian_keyword_discovery_")
             and not re.match(rf"{pfx}_DETAIL_.+_\d{{8}}_\d{{6}}\.md$", file_path.name)
             and not _contains_keyword(file_path.name, keyword)
         ):
             skipped.append({"file": str(file_path), "reason": "keyword mismatch"})
             continue
 
-        file_task = _load_zhilian_task(frontmatter_keyword) if frontmatter_keyword else task
+        file_task = _load_platform_task(platform, frontmatter_keyword) if frontmatter_keyword else task
         file_keyword = frontmatter_keyword if frontmatter_keyword else keyword
         target = _target_for_joblens_output(file_path, file_keyword, file_task, vault_path, platform)
         if target is None:

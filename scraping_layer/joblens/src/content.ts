@@ -20,7 +20,10 @@ declare global {
 
     const harvestedJobs = new Map<string, any>();
     const isZhilianPage = window.location.hostname.includes('zhaopin.com');
+    const isBossPage = window.location.hostname.includes('zhipin.com');
     const debugEnabled = window.location.href.includes("debug=1");
+    const platform = isBossPage ? 'boss' : 'zhilian';
+    const platformPfx = isBossPage ? 'BOSS' : 'ZHILIAN';
     const harvesterVersion = "v2.0.0";
     const harvestSessionKey = "joblensHarvesterSession";
     const keywordBatchSessionKey = "joblensKeywordBatchSession";
@@ -312,7 +315,12 @@ declare global {
             "530": "北京",
             "765": "广州",
             "763": "深圳",
-            "653": "杭州"
+            "653": "杭州",
+            "101020100": "上海",
+            "101010100": "北京",
+            "101280100": "广州",
+            "101280600": "深圳",
+            "101210100": "杭州"
         };
         return cityMap[getTargetCityId()] || `城市${getTargetCityId()}`;
     }
@@ -652,6 +660,49 @@ declare global {
 
     function cleanText(text: string | undefined | null): string {
         return (text || '').replace(/\s+/g, ' ').trim();
+    }
+
+    // BOSS icon-font salary decryption map
+    const BOSS_FONT_MAP: Record<string, string> = {
+        '': '0', '': '0', '': '1', '': '2',
+        '': '3', '': '4', '': '5', '': '6',
+        '': '7', '': '8', '': '9', '': '0',
+    };
+
+    function decryptBossSalary(element: HTMLElement): string {
+        const html = element.innerHTML;
+        const decoded = html.replace(/&#x([0-9a-fA-F]+);/g, (_match, hex) => {
+            const char = String.fromCharCode(parseInt(hex, 16));
+            return BOSS_FONT_MAP[char] || _match;
+        });
+        const temp = document.createElement('div');
+        temp.innerHTML = decoded;
+        const text = cleanText(temp.textContent);
+        if (text && /[\dKk]/.test(text)) return text;
+        // Fallback: extract from element text directly, also handling unicode chars
+        const raw = element.textContent || '';
+        let result = '';
+        for (let i = 0; i < raw.length; i++) {
+            const ch = raw[i];
+            result += BOSS_FONT_MAP[ch] || ch;
+        }
+        const cleaned = cleanText(result);
+        return cleaned && /[\dKk]/.test(cleaned) ? cleaned : text || cleanText(raw);
+    }
+
+    function extractBossSalaryFromText(text: string): string {
+        const match = text.match(/(\d+)\s*[kK]?\s*[-~至]\s*(\d+)\s*[kK]/);
+        if (match) return `${match[1]}-${match[2]}K`;
+        const singleMatch = text.match(/(\d+)\s*[kK]/);
+        if (singleMatch) return `${singleMatch[1]}K`;
+        return '面议';
+    }
+
+    function isBossLoginWall(): boolean {
+        if (window.location.href.includes('login.zhipin.com')) return true;
+        const bodyText = (document.body.innerText || '').slice(0, 3000);
+        // Detect BOSS login wall: various prompts asking user to log in or download the app
+        return /登录后查看|请先登录|注册新账号|免费注册|下载App|去App|下载APP|开通BOSS|登录解锁|开通VIP|开通会员/.test(bodyText);
     }
 
     function hasSalaryText(text: string): boolean {
@@ -1666,12 +1717,55 @@ declare global {
         return allGroups;
     }
 
+    async function discoverBossKeywords(overlay?: HTMLElement): Promise<KeywordGroup[]> {
+        const allGroups: KeywordGroup[] = [];
+        const menuSubs = document.querySelectorAll('div.menu-sub');
+        for (const menuSub of menuSubs) {
+            const article = menuSub.querySelector('p.menu-article');
+            const category = cleanText((article as HTMLElement)?.innerText || '');
+            if (!category) continue;
+            if (overlay) overlay.innerText = `Joblens (${harvesterVersion})\nBOSS 正在解析：${category}\n已发现分组：${allGroups.length}`;
+            const listItems = menuSub.querySelectorAll('li');
+            for (const li of listItems) {
+                const h4 = li.querySelector('h4');
+                const group = cleanText((h4 as HTMLElement)?.innerText || '');
+                if (!group) continue;
+                const textDiv = li.querySelector('div.text');
+                if (!textDiv) continue;
+                const links = textDiv.querySelectorAll('a[ka*="search_"]');
+                const keywords: string[] = [];
+                links.forEach(a => {
+                    const name = cleanText((a as HTMLElement).innerText);
+                    if (name) keywords.push(name);
+                });
+                if (keywords.length > 0) {
+                    allGroups.push({ category, group, keywords });
+                }
+            }
+            await new Promise(r => setTimeout(r, 30));
+        }
+        return allGroups;
+    }
+
     async function exportKeywordDiscoveryResult(groups: KeywordGroup[], overlay?: HTMLElement) {
         const now = new Date();
         const timestamp = now.getFullYear().toString() + (now.getMonth() + 1).toString().padStart(2, '0') + now.getDate().toString().padStart(2, '0') + '_' + now.getHours().toString().padStart(2, '0') + now.getMinutes().toString().padStart(2, '0') + now.getSeconds().toString().padStart(2, '0');
-        const fileName = `zhilian_keyword_discovery_${timestamp}.md`;
-        let content = `# 智联岗位关键词池：${getTargetCityName()}\n\n- 时间：${new Date().toLocaleString()}\n\n`;
+        const pfx = isBossPage ? 'boss_keyword_discovery' : 'zhilian_keyword_discovery';
+        const fileName = `${pfx}_${timestamp}.md`;
+        const title = isBossPage ? 'BOSS直聘' : '智联';
+        const sourceLabel = isBossPage ? 'BOSS直聘SEO页面' : '智联招聘首页职位分类';
         const categories = Array.from(new Set(groups.map(g => g.category)));
+        const categoryCount = categories.length;
+        const subCategoryCount = groups.length;
+        const keywordCount = groups.reduce((sum, g) => sum + g.keywords.length, 0);
+        let content = `# ${title}岗位关键词池：${getTargetCityName()}\n\n`;
+        content += `- 来源：${sourceLabel}\n`;
+        content += `- 状态：✅ 关键词发现成功\n`;
+        content += `- 一级分类数：${categoryCount}\n`;
+        content += `- 二级分组数：${subCategoryCount}\n`;
+        content += `- 去重岗位词数：${keywordCount}\n`;
+        content += `- 采集URL：${window.location.href}\n`;
+        content += `- 时间：${new Date().toLocaleString()}\n\n`;
         categories.forEach(c => {
             content += `## ${c}\n\n`;
             groups.filter(g => g.category === c).forEach(g => {
@@ -1701,22 +1795,293 @@ declare global {
         }
     }
 
+    // --- BOSS直聘 list harvesting ---
+
+    function findBossJobCard(anchor: HTMLAnchorElement): HTMLElement | null {
+        let card: HTMLElement | null = anchor;
+        let depth = 0;
+        while (card && card !== document.body && depth < 12) {
+            const text = cleanText(card.innerText);
+            const hasCompanyLink = Boolean(card.querySelector("a[href*='/gongsi/'], a[href*='/company/']"));
+            const hasSalary = /[-Kk薪]/.test(card.innerText);
+            if (text && text.length >= 30 && text.length <= 1500 && hasCompanyLink && hasSalary) {
+                return card;
+            }
+            card = card.parentElement;
+            depth++;
+        }
+        return anchor.closest("li, [class*='job-card'], [class*='jobCard'], [class*='job-item'], [class*='jobItem']") as HTMLElement | null;
+    }
+
+    // Decode all BOSS font-encrypted chars in a string using BOSS_FONT_MAP
+    function decodeBossFontText(text: string): string {
+        let result = text;
+        // Replace PUA chars by scanning the string
+        for (let i = 0; i < result.length; i++) {
+            const mapped = BOSS_FONT_MAP[result[i]];
+            if (mapped) {
+                result = result.replace(new RegExp(result[i], 'g'), mapped);
+            }
+        }
+        return result;
+    }
+
+    function parseBossJobCard(card: HTMLElement, anchor: HTMLAnchorElement): any {
+        const title = cleanText(anchor.innerText).slice(0, 60);
+        const url = anchor.href.split('?')[0];
+
+        // Salary — decode all font chars in card HTML, then extract
+        let salary = '面议';
+        const cardHtml = card.innerHTML;
+        // Decode &#x hex entities if any
+        let decodedHtml = cardHtml.replace(/&#x([0-9a-fA-F]+);/g, (_m, hex) => {
+            const ch = String.fromCharCode(parseInt(hex, 16));
+            return BOSS_FONT_MAP[ch] || _m;
+        });
+        // Decode raw PUA chars
+        decodedHtml = decodeBossFontText(decodedHtml);
+        // Parse back to text
+        const tmp = document.createElement('div');
+        tmp.innerHTML = decodedHtml;
+        const decodedText = cleanText(tmp.textContent || '');
+        const salaryMatch = decodedText.match(/(\d+)\s*[-~至]\s*(\d+)\s*K(?:\s*[·•]\s*\d+薪)?|(\d+)\s*K|(\d+-\d+)\s*元\/天|面议/);
+        salary = salaryMatch ? salaryMatch[0].replace(/\s+/g, '') : '面议';
+
+        // Company — BOSS uses /gongsi/ not /company/
+        const companyEl = card.querySelector("a[href*='/gongsi/'], a[href*='/company/']") as HTMLElement | null;
+        const companyHref = (companyEl as HTMLAnchorElement)?.href || '';
+        const company = cleanText(companyEl?.textContent || '').slice(0, 80) || '未知';
+
+        // Area — prefer structured selectors, avoid broad [class*="area"] matches
+        const areaEl = card.querySelector('.job-area, .area-link, [class*="job-area"], [class*="jobArea"], [class*="work-area"]') as HTMLElement | null;
+        let area = cleanText(areaEl?.textContent || areaEl?.innerText || '');
+        if (!area || area.length > 40) {
+            // fallback: search for city name in card text
+            const cardText = cleanText(card.innerText);
+            for (const city of cityNames) {
+                const idx = cardText.indexOf(city);
+                if (idx >= 0) {
+                    area = cardText.slice(idx, idx + 20).split(/[\n\r]/)[0].trim();
+                    break;
+                }
+            }
+        }
+        if (!area) area = '未知';
+
+        const tags = Array.from(card.querySelectorAll('[class*="tag"], [class*="Tag"], [class*="label"], [class*="Label"]'))
+            .map(el => cleanText((el as HTMLElement).innerText))
+            .filter(Boolean)
+            .filter(t => t.length <= 24);
+
+        return { title, url, salary, company, companyUrl: companyHref, area, skills: tags };
+    }
+
+    async function scanAndHarvestBoss(overlay?: HTMLElement) {
+        const jobLinks = document.querySelectorAll("a[href*='/job_detail/']");
+        jobLinks.forEach(link => {
+            try {
+                const anchor = link as HTMLAnchorElement;
+                const fullUrl = anchor.href.split('?')[0];
+                const title = cleanText(anchor.innerText);
+                if (harvestedJobs.has(fullUrl)) return;
+                if (title.length < 2) return;
+                const card = findBossJobCard(anchor);
+                if (card) {
+                    const job = parseBossJobCard(card, anchor);
+                    harvestedJobs.set(fullUrl, job);
+                    if (overlay) overlay.innerText = `Joblens (${harvesterVersion})\n已捕获：${harvestedJobs.size} 个岗位...`;
+                }
+            } catch (e) {}
+        });
+    }
+
+    function getBossNextPageUrl(): string | null {
+        const nextBtn = document.querySelector('[class*="next"], .options-pages a:last-child, [title="下一页"]') as HTMLAnchorElement | null;
+        if (!nextBtn || nextBtn.classList.contains('disabled') || nextBtn.getAttribute('aria-disabled') === 'true') return null;
+        const href = nextBtn.getAttribute('href');
+        if (!href) return null;
+        return new URL(href, window.location.href).toString();
+    }
+
+    async function handleBossPagination(): Promise<boolean> {
+        const nextUrl = getBossNextPageUrl();
+        if (!nextUrl) return false;
+        await new Promise(r => setTimeout(r, 5000));
+        window.location.replace(nextUrl);
+        return true;
+    }
+
+    // --- BOSS直聘 detail page parsing ---
+
+    type BossDetailResult = {
+        status: "success" | "failed";
+        jobUrl: string;
+        detailTitle?: string;
+        detailTags?: string[];
+        salary?: string;
+        companyName?: string;
+        workAddress?: string;
+        descriptionText?: string;
+        raw?: {
+            detailText: string;
+            detailHtml?: string;
+            capturedAt: string;
+        };
+        error?: string;
+    };
+
+    function parseBossDetailPage(): BossDetailResult {
+        try {
+            if (isCaptchaPage()) {
+                return { status: "failed", jobUrl: window.location.href.split("?")[0], error: "security verification page detected" };
+            }
+            if (isBossLoginWall()) {
+                return { status: "failed", jobUrl: window.location.href.split("?")[0], error: "login required" };
+            }
+
+            const jobUrl = window.location.href.split("?")[0];
+
+            const titleEl = document.querySelector('h1, [class*="job-name"], [class*="jobName"], [class*="name"]') as HTMLElement | null;
+            const title = cleanText(titleEl?.innerText);
+
+            const salaryEl = document.querySelector('[class*="salary"], [class*="job-salary"], [class*="jobSalary"]') as HTMLElement | null;
+            let salary = '';
+            if (salaryEl) {
+                salary = decryptBossSalary(salaryEl) || extractBossSalaryFromText(cleanText(salaryEl.innerText));
+            }
+
+            const companyEl = document.querySelector('[class*="company-name"], [class*="companyName"]') as HTMLElement | null;
+            const company = cleanText(companyEl?.innerText);
+
+            const tagEls = document.querySelectorAll('[class*="job-keyword"], [class*="jobKeyword"], [class*="tag-item"]');
+            const tags = Array.from(tagEls).map(el => cleanText((el as HTMLElement).innerText)).filter(Boolean);
+
+            const descEl = document.querySelector('[class*="job-sec-text"], [class*="jobSecText"], [class*="job-detail"], [class*="jobDetail"], [class*="detail-text"]') as HTMLElement | null;
+            const description = cleanText(descEl?.innerText || document.body.innerText);
+
+            const addrEl = document.querySelector('[class*="job-address"], [class*="jobAddress"], [class*="location-address"]') as HTMLElement | null;
+            const address = cleanText(addrEl?.innerText);
+
+            return {
+                status: "success", jobUrl,
+                detailTitle: title, detailTags: tags, salary,
+                companyName: company, workAddress: address,
+                descriptionText: description,
+                raw: {
+                    detailText: document.body.innerText,
+                    detailHtml: document.documentElement.outerHTML,
+                    capturedAt: new Date().toISOString(),
+                }
+            };
+        } catch (error) {
+            return { status: "failed", jobUrl: window.location.href.split("?")[0], error: error instanceof Error ? error.message : String(error) };
+        }
+    }
+
+    // --- BOSS直聘 export helpers ---
+
+    async function triggerBossFinalSave(isAuto: boolean, overlay?: HTMLElement) {
+        await scanAndHarvestBoss(overlay);
+        const keyword = getKeywordFromPage();
+        const now = new Date();
+        const timestamp = now.getFullYear().toString() + (now.getMonth() + 1).toString().padStart(2, '0') + now.getDate().toString().padStart(2, '0') + '_' + now.getHours().toString().padStart(2, '0') + now.getMinutes().toString().padStart(2, '0') + now.getSeconds().toString().padStart(2, '0');
+        const fileName = isHarvestTestMode() ? `BOSS_TEST_${keyword}_${timestamp}.md` : `BOSS_${keyword}_${timestamp}.md`;
+        const jobs = Array.from(harvestedJobs.values());
+        let content = `# BOSS直聘岗位收割：${keyword}\n\n- 数量：${jobs.length}\n- 时间：${new Date().toLocaleString()}\n\n## 岗位列表\n\n`;
+        jobs.forEach((r, idx) => {
+            content += `### ${idx + 1}. ${r.title}\n- 公司：${r.company || '未知'}\n- 薪资：**${r.salary}**\n- 地点：${r.area || '未知'}\n- 链接：[查看详情](${r.url})\n\n`;
+        });
+        const response = await downloadTextFile(fileName, content, "text/markdown", isAuto);
+        if (response?.success && isAuto && overlay) { overlay.style.background = "green"; overlay.innerText = "✅ BOSS采集完成"; }
+        if (isAuto && isListQueueMode()) {
+            await chrome.runtime.sendMessage({ action: "bossListHarvestDone", success: Boolean(response?.success), keyword, fileName });
+            await chrome.runtime.sendMessage({ action: "closeCurrentTab" });
+        }
+    }
+
+    async function exportBossDirectJobDetailResult(overlay: HTMLElement) {
+        const now = new Date();
+        const timestamp = now.getFullYear().toString() + (now.getMonth() + 1).toString().padStart(2, '0') + now.getDate().toString().padStart(2, '0') + '_' + now.getHours().toString().padStart(2, '0') + now.getMinutes().toString().padStart(2, '0') + now.getSeconds().toString().padStart(2, '0');
+        const keyword = getDirectJobDetailKeyword();
+        const detail = parseBossDetailPage();
+        const job = {
+            title: detail.detailTitle || document.title || "未知岗位",
+            company: detail.companyName || "未知公司",
+            companyUrl: window.location.origin,
+            area: detail.workAddress || "未知",
+            salary: detail.salary || "未知",
+            exp: "未知", edu: "未知",
+            url: detail.jobUrl || window.location.href.split("?")[0]
+        };
+        const metadata = { platform: "boss", keyword, url: window.location.href, collectedAt: now.toISOString(), mode: "job_detail", harvesterVersion };
+        const companyName = sanitizeArtifactNamePart(job.company, "unknown_company");
+        const jobTitle = sanitizeArtifactNamePart(job.title, "unknown_job");
+        const markdownFileName = `BOSS_DETAIL_${companyName}_${jobTitle}_${timestamp}.md`;
+
+        const markdownResp = await downloadTextFile(markdownFileName, createBossDetailMarkdown(job, detail, metadata), "text/markdown", true);
+
+        if (!markdownResp?.success || detail.status === "failed") {
+            if (isCaptchaPage()) {
+                overlay.style.background = "red";
+                overlay.innerText = `⚠️ 验证码拦截！\n请手动完成人机验证`;
+                chrome.runtime.sendMessage({ action: "captchaDetected" }).catch(() => {});
+                return;
+            }
+            if (isBossLoginWall()) {
+                overlay.style.background = "red";
+                overlay.innerText = `⚠️ 需要登录BOSS直聘\n请在浏览器中登录后重试\n登录后刷新页面即可继续采集`;
+                chrome.runtime.sendMessage({ action: "bossLoginRequired" }).catch(() => {});
+                return;
+            }
+        }
+
+        if (markdownResp?.success) {
+            overlay.style.background = "green";
+            overlay.innerText = `✅ BOSS详情采集完成\n${job.company}\n${job.title}`;
+        } else {
+            overlay.style.background = "#9a3412";
+            overlay.innerText = `详情文件下载失败：${markdownResp?.error || "未知错误"}`;
+        }
+        setTimeout(() => { chrome.runtime.sendMessage({ action: "closeCurrentTab" }).catch(() => { window.close(); }); }, 1500);
+    }
+
+    function createBossDetailMarkdown(job: any, detail: BossDetailResult, metadata: any): string {
+        let content = `---\nsource: boss\nkeyword: ${metadata.keyword}\ncompany: ${job.company}\ntitle: ${job.title}\nurl: ${job.url}\ncollected: ${metadata.collectedAt}\n---\n\n`;
+        content += `# ${job.company}_${job.title}\n\n`;
+        content += `- 来源：BOSS直聘\n- 状态：详情页采集\n- 公司：${job.company}\n- 地点：${job.area || "未知"}\n- 薪资：${job.salary || "未知"}\n- 岗位链接：[查看详情](${job.url})\n- 采集URL：${window.location.href}\n- 时间：${new Date().toLocaleString()}\n\n`;
+        content += `## 详情字段\n\n- 详情状态：${detail.status}\n`;
+        if (detail.status === "failed") {
+            content += `- 失败原因：${detail.error || "未知"}\n`;
+            return content;
+        }
+        content += `- 详情标题：${detail.detailTitle || "未知"}\n- 详情薪资：${detail.salary || "未知"}\n- 详情公司：${detail.companyName || "未知"}\n- 详情地址：${detail.workAddress || "未知"}\n\n`;
+        content += `## 详情岗位标签\n\n${detail.detailTags?.length ? detail.detailTags.map(tag => `- ${tag}`).join("\n") : "- 未提供"}\n\n`;
+        content += `## 职位详情全文\n\n${detail.descriptionText || "未知"}\n\n`;
+        return content;
+    }
+
     // Main entry point logic...
-    if (isKeywordDiscoveryMode() && isZhilianPage) {
+    if (isKeywordDiscoveryMode()) {
         const overlay = document.createElement('div');
         overlay.style.cssText = 'position:fixed;top:10px;right:10px;background:#2563eb;color:white;padding:20px;z-index:999999;font-weight:bold;border-radius:10px;';
         document.body.appendChild(overlay);
         setTimeout(async () => {
-            const groups = await discoverZhilianKeywords(overlay);
+            const groups = isZhilianPage
+                ? await discoverZhilianKeywords(overlay)
+                : await discoverBossKeywords(overlay);
             await exportKeywordDiscoveryResult(groups, overlay);
         }, 2500);
     }
 
-    if (isDirectJobDetailMode() && isZhilianPage) {
+    if (isDirectJobDetailMode()) {
         const overlay = document.createElement('div');
         overlay.style.cssText = 'position:fixed;top:10px;right:10px;background:#7c3aed;color:white;padding:20px;z-index:999999;font-weight:bold;border-radius:10px;';
         document.body.appendChild(overlay);
-        setTimeout(() => exportDirectJobDetailResult(overlay), 1800);
+        if (isZhilianPage) {
+            setTimeout(() => exportDirectJobDetailResult(overlay), 1800);
+        } else if (isBossPage) {
+            setTimeout(() => exportBossDirectJobDetailResult(overlay), 3500);
+        }
     }
 
     const isAuto = window.location.href.includes('joblens_auto=1') && !isKeywordDiscoveryMode() && !isDirectJobDetailMode();
@@ -1725,10 +2090,19 @@ declare global {
         overlay.style.cssText = 'position:fixed;top:10px;right:10px;background:red;color:white;padding:20px;z-index:999999;font-weight:bold;border-radius:10px;';
         document.body.appendChild(overlay);
         setTimeout(async () => {
-            await autoScroll(true, overlay);
-            await triggerFinalSave(true, overlay);
-            const isBatch = isKeywordBatchMode();
-            if (isBatch) await advanceKeywordBatch(overlay);
+            if (isZhilianPage) {
+                await autoScroll(true, overlay);
+                await triggerFinalSave(true, overlay);
+                const isBatch = isKeywordBatchMode();
+                if (isBatch) await advanceKeywordBatch(overlay);
+            } else if (isBossPage) {
+                await scanAndHarvestBoss(overlay);
+                await triggerBossFinalSave(true, overlay);
+                const hasNext = await handleBossPagination();
+                if (!hasNext && overlay) {
+                    // pagination exhausted — already saved by triggerBossFinalSave
+                }
+            }
         }, 3000);
     }
 
@@ -1736,6 +2110,7 @@ declare global {
         if (window.joblensGeneration !== myGeneration) return;
         if (request.action === "ping") { sendResponse({ success: true }); return true; }
         if (request.action === "parseZhilianDetail") { sendResponse(parseZhilianDetailPage()); return true; }
+        if (request.action === "parseBossDetail") { sendResponse(parseBossDetailPage()); return true; }
         return true;
     });
 })();

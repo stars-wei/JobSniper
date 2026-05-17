@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 JobSniper is a FastMCP stdio server that turns a local job-hunting workspace into MCP-accessible tools and resources. It bridges Chrome-based web scraping (via the Joblens extension), a local filesystem vault of job postings, and a user persona for skill tracking — all exposed through the MCP protocol so AI coding assistants can search, collect, and archive recruitment data.
 
-Current focus: **智联招聘 (Zhilian)**. BOSS直聘 scaffolding exists but is not yet wired.
+Current focus: **智联招聘 (Zhilian)** and **BOSS直聘** via unified MCP tools.
 
 ## Common commands
 
@@ -58,11 +58,13 @@ The MCP server does **not** scrape directly. Instead:
 4. A bash monitor script watches results files and invokes `scraping_layer/scripts/archive_outputs.py` to move files into the vault:
 
 ```bash
-# Monitor detail collection queue (polling interval 15s)
-bash scraping_layer/scripts/watch_downloads.sh
+# Zhilian monitors
+bash scraping_layer/scripts/watch_downloads.sh        # detail queue
+bash scraping_layer/scripts/watch_job_list.sh          # list queue
 
-# Monitor list collection queue (polling interval 15s)
-bash scraping_layer/scripts/watch_job_list.sh
+# BOSS monitors
+bash scraping_layer/scripts/watch_boss_downloads.sh    # detail queue
+bash scraping_layer/scripts/watch_boss_job_list.sh     # list queue
 ```
 
 Each monitor is idempotent (lock-file protected). They detect captcha, handle retries, trigger archive on completion, and pop up a Windows notification via `powershell.exe`.
@@ -76,11 +78,11 @@ Key implication: the MCP server and the browser run in **different OS environmen
 - `jobsniper://vault/positions/{platform}/{path_to_job}` — read a job detail markdown by relative path within the vault
 
 **Tools:**
-- `find_job_detail` — filename substring search across the vault (excludes `_`-prefixed index files)
-- `launch_zhilian_job_menu_collection` — discover industry/domain/keyword taxonomy
-- `launch_zhilian_job_list_collection` — enqueue a job list scrape for a keyword
-- `launch_zhilian_job_detail_collection` — enqueue a single job detail scrape
-- `archive_joblens_outputs` — move/copy files from `D:\Downloads` into the vault tree
+- `find_job_detail` — filename substring search across the vault (platform: zhilian/boss)
+- `launch_job_menu_collection` — discover industry/domain/keyword taxonomy (platform param)
+- `launch_job_list_collection` — enqueue a job list scrape for a keyword (platform param)
+- `launch_job_detail_collection` — enqueue a single job detail scrape (platform param)
+- `archive_joblens_outputs` — move/copy files from `D:\Downloads` into the vault tree (platform param)
 - `update_persona` — adjust skill confidence scores
 
 ## File naming conventions
@@ -88,7 +90,7 @@ Key implication: the MCP server and the browser run in **different OS environmen
 - Index files: `_{type}索引表_{name}.md` (e.g. `_岗位索引表_AI产品经理.md`)
 - Job details: `{公司名称}_{岗位名称}.md`
 - Keyword discovery: `zhilian_keyword_discovery_{timestamp}.md` (archived to `storage_layer/positions/` root)
-- Joblens transport files: `ZHILIAN_DETAIL_{公司}_{岗位}_{YYYYMMDD}_{HHMMSS}.md`
+- Joblens transport files: `{PFX}_DETAIL_{公司}_{岗位}_{YYYYMMDD}_{HHMMSS}.md` (PFX=`ZHILIAN` or `BOSS`)
 
 Full naming rules in `docs/CODING_GUIDELINES.md`.
 
@@ -96,6 +98,8 @@ Full naming rules in `docs/CODING_GUIDELINES.md`.
 
 - The `D:\Downloads` ↔ `/mnt/d/Downloads` bridge is fragile. WSL may mount it read-only, in which case `shutil.move` fails and the archiver falls back to `shutil.copy2`. The standalone `scraping_layer/scripts/archive_outputs.py` has more robust fallback logic than the in-server version.
 - Captcha detection: the Joblens extension detects security verification pages and pauses the detail queue, writing `failed` with reason `captcha detected`. Manual intervention is required before resuming.
+- BOSS直聘 uses custom icon-font encryption for salary numbers (Unicode `-`). The content script decodes these via `FONT_MAP` in `decryptBossSalary()`.
+- BOSS直聘 may require login for detail pages. The content script detects login walls and returns `failed` with reason `login required`.
 - This codebase assumes a specific machine setup (WSL with Windows Chrome at a fixed path, Downloads at `D:\`). Paths are hardcoded in `mcp_server.py` constants.
 
 ## /job-recommend skill

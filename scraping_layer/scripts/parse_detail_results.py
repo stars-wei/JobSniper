@@ -29,6 +29,8 @@ def identity(row: dict) -> str:
     url = row.get("normalized_url") or row.get("url")
     if not job_id and url:
         m = re.search(r"/jobdetail/([^/?#]+)\.htm", normalize_url(url), re.I)
+        if not m:
+            m = re.search(r"/job_detail/([^/?#]+)\.html", normalize_url(url), re.I)
         if m:
             job_id = m.group(1)
     if job_id:

@@ -14,6 +14,7 @@
   ],
   "host_permissions": [
     "https://*.zhaopin.com/*",
+    "https://*.zhipin.com/*",
     "file:///D:/Downloads/*"
   ],
   "background": {
@@ -22,7 +23,8 @@
   "content_scripts": [
     {
       "matches": [
-        "https://*.zhaopin.com/*"
+        "https://*.zhaopin.com/*",
+        "https://*.zhipin.com/*"
       ],
       "js": [
         "content.js"

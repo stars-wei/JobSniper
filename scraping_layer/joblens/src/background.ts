@@ -18,6 +18,19 @@ const LIST_DONE_LOCKS_KEY = 'joblens_list_done_locks_v1';
 const LIST_INFLIGHT_LOCKS_KEY = 'joblens_list_inflight_locks_v1';
 const LIST_INFLIGHT_TTL_MS = 30 * 60 * 1000;
 
+const BOSS_DETAIL_TASK_FILE = 'file:///D:/Downloads/boss_detail_tasks.jsonl';
+const BOSS_DETAIL_RESULTS_FILE = 'boss_detail_results.jsonl';
+const BOSS_DETAIL_DONE_LOCKS_KEY = 'joblens_boss_detail_done_locks_v1';
+const BOSS_DETAIL_INFLIGHT_LOCKS_KEY = 'joblens_boss_detail_inflight_locks_v1';
+const BOSS_DETAIL_INFLIGHT_TTL_MS = 10 * 60 * 1000;
+const BOSS_DETAIL_QUEUE_PAUSED_KEY = 'joblens_boss_detail_queue_paused_v1';
+
+const BOSS_LIST_TASK_FILE = 'file:///D:/Downloads/boss_list_tasks.jsonl';
+const BOSS_LIST_RESULTS_FILE = 'boss_list_results.jsonl';
+const BOSS_LIST_DONE_LOCKS_KEY = 'joblens_boss_list_done_locks_v1';
+const BOSS_LIST_INFLIGHT_LOCKS_KEY = 'joblens_boss_list_inflight_locks_v1';
+const BOSS_LIST_INFLIGHT_TTL_MS = 30 * 60 * 1000;
+
 type DetailTask = {
 	index: number;
 	url: string;
@@ -71,6 +84,15 @@ const listRuntimeClaims = new Set<string>();
 const captchaResolvers = new Map<number, (result: DetailProcessResult) => void>();
 const listHarvestResolvers = new Map<number, (result: ListProcessResult) => void>();
 
+let isBossDetailQueueRunning = false;
+let isBossListQueueRunning = false;
+
+const bossDetailRuntimeClaims = new Set<string>();
+const bossListRuntimeClaims = new Set<string>();
+const bossCaptchaResolvers = new Map<number, (result: DetailProcessResult) => void>();
+const bossListHarvestResolvers = new Map<number, (result: ListProcessResult) => void>();
+	const bossLoginRequiredResolvers = new Map<number, (result: DetailProcessResult) => void>();
+
 function sleep(ms: number): Promise<void> {
 	return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -123,6 +145,77 @@ function getDetailTaskLockKey(task: Pick<DetailTask, 'url' | 'jobId'>): string {
 
 function getListTaskLockKey(task: Pick<ListTask, 'url' | 'taskId'>): string {
 	return task.taskId ? `task:${task.taskId}` : `url:${normalizeZhilianListUrl(task.url)}`;
+}
+
+function normalizeBossDetailUrl(url: string): string {
+	try {
+		const parsed = new URL(url);
+		parsed.protocol = 'https:';
+		parsed.hash = '';
+		parsed.search = '';
+		return parsed.toString();
+	} catch {
+		return url.split('#')[0].split('?')[0].replace(/^http:/, 'https:');
+	}
+}
+
+function getBossDetailJobId(url: string): string | undefined {
+	const match = normalizeBossDetailUrl(url).match(/\/job_detail\/([^/?#]+)\.html/i);
+	return match?.[1];
+}
+
+function normalizeBossListUrl(url: string): string {
+	try {
+		const parsed = new URL(url);
+		parsed.protocol = 'https:';
+		parsed.hash = '';
+		return parsed.toString();
+	} catch {
+		return url.split('#')[0].replace(/^http:/, 'https:');
+	}
+}
+
+function getBossDetailTaskLockKey(task: Pick<DetailTask, 'url' | 'jobId'>): string {
+	const jobId = task.jobId || getBossDetailJobId(task.url);
+	return jobId ? `boss_job:${jobId}` : `boss_url:${normalizeBossDetailUrl(task.url)}`;
+}
+
+function getBossListTaskLockKey(task: Pick<ListTask, 'url' | 'taskId'>): string {
+	return task.taskId ? `boss_task:${task.taskId}` : `boss_url:${normalizeBossListUrl(task.url)}`;
+}
+
+async function readBossDetailQueuePauseState(): Promise<QueuePauseState> {
+	try {
+		const data = await chrome.storage.local.get(BOSS_DETAIL_QUEUE_PAUSED_KEY);
+		const value = data[BOSS_DETAIL_QUEUE_PAUSED_KEY];
+		if (value && typeof value === 'object') {
+			const v = value as Record<string, unknown>;
+			return {
+				paused: Boolean(v.paused),
+				reason: typeof v.reason === 'string' ? v.reason : undefined,
+				paused_at: typeof v.paused_at === 'string' ? v.paused_at : undefined,
+				tab_id: typeof v.tab_id === 'number' ? v.tab_id : undefined
+			};
+		}
+	} catch {}
+	return { paused: false };
+}
+
+async function setBossDetailQueuePaused(paused: boolean, reason?: string, tabId?: number): Promise<void> {
+	try {
+		if (paused) {
+			await chrome.storage.local.set({
+				[BOSS_DETAIL_QUEUE_PAUSED_KEY]: { paused: true, reason, paused_at: new Date().toISOString(), tab_id: tabId }
+			});
+			try { await chrome.action.setBadgeBackgroundColor({ color: '#b91c1c' }); } catch {}
+			try { await chrome.action.setBadgeText({ text: 'CAP' }); } catch {}
+			try { await chrome.alarms.clear('bossDetailQueuePoll'); } catch {}
+			return;
+		}
+		await chrome.storage.local.set({ [BOSS_DETAIL_QUEUE_PAUSED_KEY]: { paused: false, resumed_at: new Date().toISOString() } });
+		try { await chrome.action.setBadgeText({ text: '' }); } catch {}
+		try { chrome.alarms.create('bossDetailQueuePoll', { periodInMinutes: 5 / 60 }); } catch {}
+	} catch {}
 }
 
 async function injectContentScript(tabId: number): Promise<void> {
@@ -512,8 +605,113 @@ async function processSingleListUrl(url: string): Promise<ListProcessResult> {
 	}
 }
 
+async function processSingleBossDetailUrl(url: string): Promise<DetailProcessResult> {
+	let tabId: number | undefined;
+	let timedOut = false;
+	let resolvedResult: DetailProcessResult | undefined;
+
+	try {
+		const tab = await chrome.tabs.create({ url, active: false });
+		tabId = tab.id;
+		if (!tabId) return { success: false, reason: 'no tab id' };
+
+		await new Promise<void>((resolve) => {
+			const cleanup = () => {
+				chrome.tabs.onRemoved.removeListener(handleRemoved);
+				clearTimeout(timer);
+				if (tabId) bossCaptchaResolvers.delete(tabId);
+				if (tabId) bossLoginRequiredResolvers.delete(tabId);
+			};
+			const handleRemoved = (removedId: number) => {
+				if (removedId !== tabId) return;
+				cleanup();
+				if (!resolvedResult) resolvedResult = { success: true };
+				resolve();
+			};
+			const timer = setTimeout(() => {
+				timedOut = true;
+				cleanup();
+				resolve();
+			}, 60000);
+
+			chrome.tabs.onRemoved.addListener(handleRemoved);
+			bossCaptchaResolvers.set(tabId!, (result: DetailProcessResult) => {
+				cleanup();
+				resolvedResult = result;
+				resolve();
+			});
+			bossLoginRequiredResolvers.set(tabId!, (result: DetailProcessResult) => {
+				cleanup();
+				resolvedResult = result;
+				resolve();
+			});
+		});
+
+		if (resolvedResult) return resolvedResult;
+		if (timedOut) return { success: false, reason: 'timeout (60s)' };
+		return { success: true };
+	} catch (error) {
+		if (tabId) {
+			try { await chrome.tabs.remove(tabId); } catch {}
+		}
+		return { success: false, reason: error instanceof Error ? error.message : 'exception' };
+	}
+}
+
+async function waitForBossListHarvestOrTimeout(tabId: number, timeoutMs = 10 * 60 * 1000): Promise<ListProcessResult> {
+	let timedOut = false;
+	let resolvedResult: ListProcessResult | undefined;
+
+	await new Promise<void>((resolve) => {
+		const cleanup = () => {
+			chrome.tabs.onRemoved.removeListener(handleRemoved);
+			clearTimeout(timer);
+			bossListHarvestResolvers.delete(tabId);
+		};
+		const handleRemoved = (removedId: number) => {
+			if (removedId !== tabId) return;
+			cleanup();
+			if (!resolvedResult) resolvedResult = { success: false, reason: 'tab closed' };
+			resolve();
+		};
+		const timer = setTimeout(() => {
+			timedOut = true;
+			cleanup();
+			resolve();
+		}, timeoutMs);
+
+		chrome.tabs.onRemoved.addListener(handleRemoved);
+		bossListHarvestResolvers.set(tabId, (result: ListProcessResult) => {
+			cleanup();
+			resolvedResult = result;
+			resolve();
+		});
+	});
+
+	if (resolvedResult) return resolvedResult;
+	if (timedOut) return { success: false, reason: `timeout (${Math.floor(timeoutMs / 1000)}s)` };
+	return { success: false, reason: 'unknown' };
+}
+
+async function processSingleBossListUrl(url: string): Promise<ListProcessResult> {
+	let tabId: number | undefined;
+	try {
+		const tab = await chrome.tabs.create({ url, active: false });
+		tabId = tab.id;
+		if (!tabId) return { success: false, reason: 'no tab id' };
+
+		const result = await waitForBossListHarvestOrTimeout(tabId);
+		return result;
+	} catch (error) {
+		if (tabId) {
+			try { await chrome.tabs.remove(tabId); } catch {}
+		}
+		return { success: false, reason: error instanceof Error ? error.message : 'exception' };
+	}
+}
+	
 async function runDetailTaskQueue(): Promise<void> {
-	if (isDetailQueueRunning) return;
+if (isDetailQueueRunning) return;
 	isDetailQueueRunning = true;
 
 	try {
@@ -753,12 +951,34 @@ async function handleCaptchaDetected(sender: chrome.runtime.MessageSender): Prom
 		try { await chrome.windows.update(sender.tab.windowId, { focused: true }); } catch {}
 	}
 
+		const bossResolver = bossCaptchaResolvers.get(tabId);
+		if (bossResolver) {
+			await setBossDetailQueuePaused(true, 'captcha detected', tabId);
+			bossResolver({ success: false, reason: 'captcha detected' });
+			return;
+		}
+
 	await setDetailQueuePaused(true, 'captcha detected', tabId);
 	const resolver = captchaResolvers.get(tabId);
 	if (resolver) {
 		resolver({ success: false, reason: 'captcha detected' });
 	}
 }
+
+	async function handleBossLoginRequired(sender: chrome.runtime.MessageSender): Promise<void> {
+		const tabId = sender.tab?.id;
+		if (!tabId) return;
+		console.log('[Joblens] BOSS login required, bringing tab to foreground:', tabId);
+		try { await chrome.tabs.update(tabId, { active: true }); } catch {}
+		if (sender.tab?.windowId) {
+			try { await chrome.windows.update(sender.tab.windowId, { focused: true }); } catch {}
+		}
+		await setBossDetailQueuePaused(true, 'login required', tabId);
+		const resolver = bossLoginRequiredResolvers.get(tabId);
+		if (resolver) {
+			resolver({ success: false, reason: 'login required' });
+		}
+	}
 
 function handleRuntimeMessage(
 	request: any,
@@ -794,7 +1014,34 @@ function handleRuntimeMessage(
 			}
 			sendResponse({ success: true });
 			return true;
+
 		}
+		case 'bossListHarvestDone': {
+		const tabId = sender.tab?.id;
+		const resolver = tabId ? bossListHarvestResolvers.get(tabId) : undefined;
+		if (resolver) {
+		resolver({
+		success: Boolean(typedRequest.success),
+		reason: typedRequest.error,
+		fileName: typedRequest.fileName
+		});
+		}
+		sendResponse({ success: true });
+		return true;
+		}
+
+		case 'runBossDetailTaskQueue':
+		setBossDetailQueuePaused(false)
+		.then(() => runBossDetailTaskQueue())
+		.then(() => sendResponse({ success: true }))
+		.catch(error => sendResponse({ success: false, error: error instanceof Error ? error.message : String(error) }));
+		return true;
+
+		case 'runBossListTaskQueue':
+		runBossListTaskQueue()
+		.then(() => sendResponse({ success: true }))
+		.catch(error => sendResponse({ success: false, error: error instanceof Error ? error.message : String(error) }));
+		return true;
 
 		case 'zhilianCollectDetailTest':
 			if (!Array.isArray(typedRequest.jobs) || typedRequest.jobs.length === 0) {
@@ -829,7 +1076,11 @@ function handleRuntimeMessage(
 				.then(() => sendResponse({ success: true }))
 				.catch(error => sendResponse({ success: false, error: error instanceof Error ? error.message : String(error) }));
 			return true;
-
+		case 'bossLoginRequired':
+			handleBossLoginRequired(sender)
+				.then(() => sendResponse({ success: true }))
+				.catch(error => sendResponse({ success: false, error: error instanceof Error ? error.message : String(error) }));
+			return true;
 		case 'ensureContentScriptLoaded': {
 			const tabId = typedRequest.tabId || sender.tab?.id;
 			if (!tabId) {
@@ -851,6 +1102,233 @@ function handleRuntimeMessage(
 	}
 }
 
+async function runBossDetailTaskQueue(): Promise<void> {
+	if (isBossDetailQueueRunning) return;
+	isBossDetailQueueRunning = true;
+
+	try {
+		const pauseState = await readBossDetailQueuePauseState();
+		if (pauseState.paused) {
+			console.log('[Joblens] BOSS detail queue paused:', pauseState.reason || 'paused');
+			return;
+		}
+
+		const tasks = await fetchBossDetailTasks();
+		if (tasks.length === 0) return;
+
+		const results = await readJsonlResults(BOSS_DETAIL_RESULTS_FILE);
+		const doneUrls = new Set(
+			results
+				.filter((record: any) => record?.status === 'done' && record?.url)
+				.map((record: any) => normalizeBossDetailUrl(record.url))
+		);
+		const doneJobIds = new Set(
+			results
+				.filter((record: any) => record?.status === 'done' && (record?.job_id || record?.url))
+				.map((record: any) => record.job_id || getBossDetailJobId(record.url))
+				.filter(Boolean)
+		);
+		const doneLocks = await readLockMap(BOSS_DETAIL_DONE_LOCKS_KEY);
+		const inflightLocks = await readActiveInflightLocks(BOSS_DETAIL_INFLIGHT_LOCKS_KEY, BOSS_DETAIL_INFLIGHT_TTL_MS, Date.now());
+		const pendingTasks = tasks.filter(task => {
+			const normalizedUrl = normalizeBossDetailUrl(task.url);
+			const jobId = task.jobId || getBossDetailJobId(task.url);
+			const lockKey = getBossDetailTaskLockKey(task);
+			return !doneUrls.has(normalizedUrl)
+				&& !(jobId && doneJobIds.has(jobId))
+				&& !doneLocks[lockKey]
+				&& !inflightLocks[lockKey];
+		});
+
+		if (pendingTasks.length === 0) return;
+
+		console.log('[Joblens] BOSS detail queue processing', pendingTasks.length, 'of', tasks.length, 'tasks');
+		for (const task of pendingTasks) {
+			const lockKey = getBossDetailTaskLockKey(task);
+			const claimed = await claimTask(
+				lockKey,
+				bossDetailRuntimeClaims,
+				BOSS_DETAIL_DONE_LOCKS_KEY,
+				BOSS_DETAIL_INFLIGHT_LOCKS_KEY,
+				BOSS_DETAIL_INFLIGHT_TTL_MS
+			);
+			if (!claimed) {
+				console.log('[Joblens] BOSS detail queue skip claimed task', task.index + 1, '/', tasks.length);
+				continue;
+			}
+
+			console.log('[Joblens] BOSS detail task', task.index + 1, '/', tasks.length);
+			const result = await processSingleBossDetailUrl(task.url);
+			await writeBossDetailResult(task, result.success ? 'done' : 'failed', result.reason);
+			await completeTask(lockKey, result.success, bossDetailRuntimeClaims, BOSS_DETAIL_DONE_LOCKS_KEY, BOSS_DETAIL_INFLIGHT_LOCKS_KEY);
+
+			if (!result.success && (result.reason === 'captcha detected' || result.reason === 'login required')) {
+				await setBossDetailQueuePaused(true, result.reason);
+				break;
+			}
+			await sleep(2000);
+		}
+	} catch (error) {
+		console.error('[Joblens] BOSS detail queue error:', error);
+	} finally {
+		isBossDetailQueueRunning = false;
+	}
+}
+
+async function fetchBossDetailTasks(): Promise<DetailTask[]> {
+	try {
+		const response = await fetch(BOSS_DETAIL_TASK_FILE);
+		const text = await response.text();
+		return text.trim().split('\n').filter(Boolean).map((line, index) => {
+			try {
+				const parsed = JSON.parse(line);
+				return { index, url: parsed.url, keyword: parsed.keyword, jobId: parsed.job_id || parsed.jobId };
+			} catch {
+				return { index, url: line.trim(), keyword: '' };
+			}
+		});
+	} catch {
+		return [];
+	}
+}
+
+async function writeBossDetailResult(task: DetailTask, status: string, error?: string): Promise<void> {
+	try {
+		const record: any = {
+			task_index: task.index,
+			url: task.url,
+			normalized_url: normalizeBossDetailUrl(task.url),
+			job_id: task.jobId || getBossDetailJobId(task.url),
+			keyword: task.keyword,
+			status,
+			recorded_at: new Date().toISOString()
+		};
+		if (error) record.error = error;
+
+		const existing = await readJsonlResults(BOSS_DETAIL_RESULTS_FILE);
+		existing.push(record);
+		await writeJsonlResults(BOSS_DETAIL_RESULTS_FILE, existing);
+	} catch {}
+}
+
+async function runBossListTaskQueue(): Promise<void> {
+	if (isBossListQueueRunning) return;
+	isBossListQueueRunning = true;
+
+	try {
+		const tasks = await fetchBossListTasks();
+		if (tasks.length === 0) return;
+
+		const results = await readJsonlResults(BOSS_LIST_RESULTS_FILE);
+		const doneTaskIds = new Set(
+			results
+				.filter((record: any) => record?.status === 'done' && record?.task_id)
+				.map((record: any) => String(record.task_id))
+		);
+		const doneUrls = new Set(
+			results
+				.filter((record: any) => record?.status === 'done' && record?.url)
+				.map((record: any) => normalizeBossListUrl(record.url))
+		);
+		const doneLocks = await readLockMap(BOSS_LIST_DONE_LOCKS_KEY);
+		const inflightLocks = await readActiveInflightLocks(BOSS_LIST_INFLIGHT_LOCKS_KEY, BOSS_LIST_INFLIGHT_TTL_MS, Date.now());
+
+		const pendingTasks = tasks.filter(task => {
+			const taskIdStr = String(task.taskId);
+			const normalizedUrl = normalizeBossListUrl(task.url);
+			const lockKey = getBossListTaskLockKey(task);
+			return !doneTaskIds.has(taskIdStr)
+				&& !doneUrls.has(normalizedUrl)
+				&& !doneLocks[lockKey]
+				&& !inflightLocks[lockKey];
+		});
+
+		if (pendingTasks.length === 0) return;
+
+		console.log('[Joblens] BOSS list queue processing', pendingTasks.length, 'of', tasks.length, 'tasks');
+		for (const task of pendingTasks) {
+			const lockKey = getBossListTaskLockKey(task);
+			const claimed = await claimTask(
+				lockKey,
+				bossListRuntimeClaims,
+				BOSS_LIST_DONE_LOCKS_KEY,
+				BOSS_LIST_INFLIGHT_LOCKS_KEY,
+				BOSS_LIST_INFLIGHT_TTL_MS
+			);
+			if (!claimed) {
+				console.log('[Joblens] BOSS list queue skip claimed task', task.index + 1, '/', tasks.length);
+				continue;
+			}
+
+			console.log('[Joblens] BOSS list task', task.index + 1, '/', tasks.length);
+			const result = await processSingleBossListUrl(task.url);
+			await writeBossListResult(task, result.success ? 'done' : 'failed', result.reason, result.fileName);
+			await completeTask(lockKey, result.success, bossListRuntimeClaims, BOSS_LIST_DONE_LOCKS_KEY, BOSS_LIST_INFLIGHT_LOCKS_KEY);
+			await sleep(2000);
+		}
+	} catch (error) {
+		console.error('[Joblens] BOSS list queue error:', error);
+	} finally {
+		isBossListQueueRunning = false;
+	}
+}
+
+async function fetchBossListTasks(): Promise<ListTask[]> {
+	try {
+		const response = await fetch(BOSS_LIST_TASK_FILE);
+		const text = await response.text();
+		return text.trim().split('\n').filter(Boolean).map((line, index) => {
+			try {
+				const parsed = JSON.parse(line);
+				return { index, url: parsed.url, keyword: parsed.keyword, taskId: parsed.task_id || parsed.taskId };
+			} catch {
+				return { index, url: line.trim(), keyword: '' };
+			}
+		});
+	} catch {
+		return [];
+	}
+}
+
+async function writeBossListResult(task: ListTask, status: string, error?: string, fileName?: string): Promise<void> {
+	try {
+		const record: any = {
+			task_index: task.index,
+			task_id: task.taskId,
+			url: task.url,
+			normalized_url: normalizeBossListUrl(task.url),
+			keyword: task.keyword,
+			status,
+			recorded_at: new Date().toISOString()
+		};
+		if (fileName) record.file_name = fileName;
+		if (error) record.error = error;
+
+		const existing = await readJsonlResults(BOSS_LIST_RESULTS_FILE);
+		existing.push(record);
+		await writeJsonlResults(BOSS_LIST_RESULTS_FILE, existing);
+	} catch {}
+}
+
+async function startBossDetailQueuePolling(): Promise<void> {
+	const pauseState = await readBossDetailQueuePauseState();
+	if (pauseState.paused) {
+		console.log('[Joblens] BOSS detail queue polling not started: paused:', pauseState.reason || 'paused');
+		try { await chrome.action.setBadgeBackgroundColor({ color: '#b91c1c' }); } catch {}
+		try { await chrome.action.setBadgeText({ text: 'CAP' }); } catch {}
+		return;
+	}
+
+	console.log('[Joblens] BOSS detail queue polling started (alarms, 5s)');
+	chrome.alarms.create('bossDetailQueuePoll', { periodInMinutes: 5 / 60 });
+	runBossDetailTaskQueue();
+}
+
+function startBossListQueuePolling(): void {
+	console.log('[Joblens] BOSS list queue polling started (alarms, 5s)');
+	chrome.alarms.create('bossListQueuePoll', { periodInMinutes: 5 / 60 });
+	runBossListTaskQueue();
+}
 async function startDetailQueuePolling(): Promise<void> {
 	const pauseState = await readDetailQueuePauseState();
 	if (pauseState.paused) {
@@ -879,11 +1357,19 @@ async function initialize(): Promise<void> {
 		if (alarm.name === 'listQueuePoll') {
 			runListTaskQueue();
 		}
+		if (alarm.name === 'bossDetailQueuePoll') {
+			runBossDetailTaskQueue();
+		}
+		if (alarm.name === 'bossListQueuePoll') {
+			runBossListTaskQueue();
+		}
 	});
 
 	chrome.runtime.onMessage.addListener(handleRuntimeMessage);
 	await startDetailQueuePolling();
 	startListQueuePolling();
+	await startBossDetailQueuePolling();
+	startBossListQueuePolling();
 	console.log('[Joblens] Background script initialized');
 }
 

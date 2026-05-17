@@ -32,7 +32,7 @@ def _normalize_url(value: str) -> str:
         query = parsed.query or ""
 
         # Detail URLs: query is volatile, strip it.
-        if re.search(r"/jobdetail/[^/?#]+\.htm$", path, re.I):
+        if re.search(r"/jobdetail/[^/?#]+\.htm$", path, re.I) or re.search(r"/job_detail/[^/?#]+\.html$", path, re.I):
             query = ""
         else:
             # Non-detail URLs: keep query, but sort for stability.
@@ -53,6 +53,8 @@ def _identity(row: dict) -> str:
     url = row.get("normalized_url") or row.get("url")
     if not job_id and url:
         match = re.search(r"/jobdetail/([^/?#]+)\.htm", _normalize_url(url), re.I)
+        if not match:
+            match = re.search(r"/job_detail/([^/?#]+)\.html", _normalize_url(url), re.I)
         if match:
             job_id = match.group(1)
     if job_id:
