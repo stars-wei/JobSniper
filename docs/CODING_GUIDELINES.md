@@ -21,6 +21,33 @@
 5. `[公司名称]_[岗位名称].md`，此处的岗位名称为具体的招聘信息中的岗位名称，如`昂立教育_教研经理.md`
 
 
+# 元数据规范 (Metadata)
+所有**岗位详情页**（岗位文档）必须以 YAML Front Matter 格式在文件开头包含以下元数据：
+
+```yaml
+---
+job_title: [岗位名称]
+company: [公司名称]
+position: [职业名称]（对应目录结构的第三层，即关键词）
+domain: [职能/领域]（对应目录结构的第二层）
+industry: [行业名称]（对应目录结构的第一层）
+platform: [平台名称]
+---
+```
+
+示例：
+```yaml
+---
+job_title: 软件开发助理工程师
+company: 上海旗盈企业管理咨询有限公司
+position: 小程序开发
+domain: 移动研发
+industry: 技术
+platform: 智联招聘
+---
+```
+
+
 | 示例：
 storage_layer/  
 ├── personas/  
